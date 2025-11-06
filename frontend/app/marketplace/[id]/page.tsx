@@ -9,6 +9,8 @@ import { CryptoSelectorCompact } from "@/components/crypto-selector"
 import { ShieldCheck, Zap, MessageCircle, Star } from "lucide-react"
 import { StatefulButton } from "@/components/ui/stateful-button"
 import ScrollFadeIn from "@/components/ui/scroll-fade-in"
+import { useToast } from "@/components/ui/use-toast"
+import ViewTracker from "@/components/ViewTracker"
 
 type Listing = {
   id: string
@@ -28,14 +30,14 @@ type Listing = {
 export default function ListingDetailPage() {
   const params = useParams() as { id?: string }
   const router = useRouter()
+  const { toast } = useToast()
   const id = params?.id as string
   const [listing, setListing] = useState<Listing | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
-  const [snack, setSnack] = useState("")
   const [selectedCurrency, setSelectedCurrency] = useState<string>("")
   const [selectedMethod, setSelectedMethod] = useState<'paypal' | 'crypto'>("paypal")
   const [activeImgIdx, setActiveImgIdx] = useState<number>(0)
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const apiBase = useMemo(() => process.env.NEXT_PUBLIC_API_URL!, [])
 
   useEffect(() => {
@@ -48,7 +50,11 @@ export default function ListingDetailPage() {
         if (!res.ok) {
           const j = await res.json().catch(() => ({}))
           console.log('Response error:', j)
-          setError(j.error || 'Listing not found')
+          toast({
+            title: "Error",
+            description: j.error || 'Listing not found',
+            variant: "destructive",
+          })
           return
         }
         const data = await res.json()
@@ -60,7 +66,11 @@ export default function ListingDetailPage() {
         setActiveImgIdx(0)
       } catch (err) {
         console.error('Fetch error:', err)
-        setError('Network error')
+        toast({
+          title: "Network Error",
+          description: "Failed to load listing. Please check your connection.",
+          variant: "destructive",
+        })
       } finally {
         setLoading(false)
       }
@@ -68,12 +78,28 @@ export default function ListingDetailPage() {
     init()
   }, [id, apiBase])
 
+  // Fetch current user ID
+  useEffect(() => {
+    const getCurrentUser = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.user?.id) {
+        setCurrentUserId(session.user.id)
+        console.log('Current user ID set:', session.user.id)
+      } else {
+        console.log('No user session found')
+      }
+    }
+    getCurrentUser()
+  }, [])
+
   const addToCart = async (method: 'crypto' | 'paypal') => {
-    setError("")
-    setSnack("")
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) {
-      setSnack('Please log in to add items to your cart.')
+      toast({
+        title: "Authentication Required",
+        description: "Please log in to add items to your cart.",
+        variant: "destructive",
+      })
       throw new Error('Not logged in')
     }
     if (!listing) return
@@ -87,14 +113,20 @@ export default function ListingDetailPage() {
     if (!res.ok) {
       const j = await res.json().catch(() => ({}))
       const msg = j.error || 'Failed to add to cart'
-      setError(msg)
+      toast({
+        title: "Cart Error",
+        description: msg,
+        variant: "destructive",
+      })
       throw new Error(msg)
     }
-    setSnack('')
+    toast({
+      title: "Success",
+      description: "Item added to cart successfully!",
+    })
   }
 
   const startMessaging = async () => {
-    setError("")
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) {
       router.push('/auth')
@@ -108,13 +140,21 @@ export default function ListingDetailPage() {
     })
     if (!res.ok) {
       const j = await res.json().catch(() => ({}))
-      setError(j.error || 'Failed to start conversation')
+      toast({
+        title: "Message Error",
+        description: j.error || 'Failed to start conversation',
+        variant: "destructive",
+      })
       return
     }
     const data = await res.json()
     const convId = data.conversation_id
     router.push(`/messages?c=${encodeURIComponent(convId)}`)
   }
+
+  // Check if current user is the seller
+  const isOwnListing = currentUserId && listing && currentUserId === listing.seller_id
+  console.log('isOwnListing check:', { currentUserId, listingSellerId: listing?.seller_id, isOwnListing })
 
   if (loading) {
     return <div className="min-h-screen bg-black text-white flex items-center justify-center">Loading listing...</div>
@@ -126,6 +166,9 @@ export default function ListingDetailPage() {
 
   return (
     <div className="min-h-screen bg-black text-white relative overflow-hidden">
+      {/* View Tracking Component */}
+      {id && <ViewTracker listingId={id} apiBase={apiBase} />}
+
       {/* Top-left glow (match dashboard) */}
       <div
         className="absolute top-0 left-0 -z-10 rounded-2xl overflow-hidden pointer-events-none mix-blend-screen"
@@ -197,28 +240,39 @@ export default function ListingDetailPage() {
                 )}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <StatefulButton
-                      onClick={() => addToCart(selectedMethod)}
-                      className="flex-1 h-10 rounded-xl bg-[#EA580C] text-white font-semibold hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-[#93C5FD]"
-                      success={
-                        <>
-                          <svg
-                            className="h-4 w-4"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="3"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M20 6L9 17l-5-5" />
-                          </svg>{" "}
-                          Added
-                        </>
-                      }
-                    >
-                      Buy now
-                    </StatefulButton>
+                    {isOwnListing ? (
+                      // Show disabled button for own listings
+                      <button
+                        disabled
+                        className="flex-1 h-10 rounded-xl bg-gray-600 text-gray-400 font-semibold cursor-not-allowed"
+                      >
+                        Your Listing
+                      </button>
+                    ) : (
+                      // Normal add to cart button for other listings
+                      <StatefulButton
+                        onClick={() => addToCart(selectedMethod)}
+                        className="flex-1 h-10 rounded-xl bg-[#EA580C] text-white font-semibold hover:opacity-95 focus:outline-none focus:ring-2 focus:ring-[#93C5FD]"
+                        success={
+                          <>
+                            <svg
+                              className="h-4 w-4"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>{" "}
+                            Added
+                          </>
+                        }
+                      >
+                        Add to cart
+                      </StatefulButton>
+                    )}
 
                     <button
                       onClick={startMessaging}
@@ -231,9 +285,7 @@ export default function ListingDetailPage() {
                 </div>
                 <div className="flex items-center gap-4 text-xs text-gray-400 pt-1">
                   <span className="inline-flex items-center gap-1"><ShieldCheck className="h-3.5 w-3.5" />Buyer protection</span>
-                  <span className="inline-flex items-center gap-1"><Zap className="h-3.5 w-3.5" />Instant delivery</span>
                 </div>
-                {error && <div className="text-sm text-red-300">{error}</div>}
               </div>
             </ScrollFadeIn>
 
@@ -246,12 +298,7 @@ export default function ListingDetailPage() {
           </div>
         </div>
 
-        {/* Mobile bottom actions and snackbar */}
-        {snack && (
-          <div className="fixed left-1/2 -translate-x-1/2 bottom-6 bg-white/10 border border-white/15 text-white px-4 py-2 rounded-xl text-sm shadow-lg">
-            {snack}
-          </div>
-        )}
+        {/* Mobile bottom actions */}
       </div>
     </div>
   )

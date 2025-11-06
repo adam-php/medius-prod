@@ -1,5 +1,8 @@
 # Fixed app.py - production-ready with all security and reliability improvements
 import os
+import hmac
+import hashlib
+from decimal import Decimal
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from flask_limiter import Limiter
@@ -21,6 +24,8 @@ from typing import Optional
 from threading import Lock
 import re
 import atexit
+from threading import Lock, Thread
+import socket
 
 load_dotenv()
 
@@ -190,16 +195,6 @@ def debug_auth():
         }
     }), 200
 
-# Simple health check endpoint (no auth required)
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "cors_allow_all": CORS_ALLOW_ALL,
-        "environment": os.getenv('ENV', 'not-set'),
-        "version": "1.0.0"
-    }), 200
 
 # Fallback preflight handler for any /api/* route (helps when proxies/extensions add headers)
 def _is_origin_allowed(origin: str) -> bool:
@@ -291,6 +286,25 @@ try:
 except Exception:
     pass
 
+# Analytics-specific rate limiting
+analytics_limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["100 per minute"]
+)
+
+# Flag to ensure debug routes only run once
+debug_routes_run = False
+
+@app.before_request
+def debug_routes():
+    global debug_routes_run
+    if not debug_routes_run:
+        for rule in app.url_map.iter_rules():
+            if rule.rule == '/api/marketplace/seller/products/get':
+                app.logger.info(f"Route: {rule.rule} methods={sorted(rule.methods)} endpoint={rule.endpoint}")
+        debug_routes_run = True
+
 # Initialize Supabase client (service role key expected)
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
@@ -323,6 +337,86 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 REFERRAL_RATE = float(os.getenv('REFERRAL_RATE', '0.20'))  # 20% by default
 MIN_WITHDRAW_USD = float(os.getenv('MIN_WITHDRAW_USD', '5.0'))  # minimum referral withdrawal
 COINGECKO_SIMPLE = "https://api.coingecko.com/api/v3/simple/price"
+# ============================================
+# SWAPKIT CONFIGURATION
+# ============================================
+
+# SwapKit API Settings
+SWAPKIT_API_KEY = os.getenv('SWAPKIT_API_KEY')
+SWAPKIT_WEBHOOK_SECRET = os.getenv('SWAPKIT_WEBHOOK_SECRET')
+SWAPKIT_API_URL = 'https://api.swapkit.dev'
+SWAPKIT_TIMEOUT = 30
+SWAPKIT_MAX_RETRIES = 3
+SWAPKIT_RETRY_DELAY = 2
+
+# Exchange Settings
+C2C_FEE = Decimal(os.getenv('C2C_FEE', '0.01'))  # 1% platform fee
+C2C_MIN_EXCHANGE_USD = Decimal(os.getenv('C2C_MIN_EXCHANGE_USD', '5.0'))
+C2C_RATE_LOCK_SECONDS = int(os.getenv('C2C_RATE_LOCK_SECONDS', '60'))
+DEFAULT_SLIPPAGE = Decimal(os.getenv('DEFAULT_SLIPPAGE', '1'))
+
+# Monitoring Settings
+EXCHANGE_STATUS_CHECK_INTERVAL = int(os.getenv('EXCHANGE_STATUS_CHECK_INTERVAL', '60'))
+EXCHANGE_MAX_PENDING_AGE = int(os.getenv('EXCHANGE_MAX_PENDING_AGE', '86400'))
+
+# Fee Collection Addresses (YOUR EXISTING ADDRESSES)
+FEE_ADDRESSES = {
+    'BTC': os.getenv('BTC_FEE_ADDY'),
+    'ETH': os.getenv('ETH_FEE_ADDY'),
+    'SOL': os.getenv('SOL_FEE_ADDY'),
+    'LTC': os.getenv('LTC_FEE_ADDY'),
+    'BCH': os.getenv('BCH_FEE_ADDY'),
+    'DOGE': os.getenv('DOGE_FEE_ADDY'),
+    'XRP': os.getenv('XRP_FEE_ADDY'),
+    'ADA': os.getenv('ADA_FEE_ADDY'),
+    'DOT': os.getenv('DOT_FEE_ADDY'),
+    'MATIC': os.getenv('MATIC_FEE_ADDY'),
+    'AVAX': os.getenv('AVAX_FEE_ADDY'),
+    'TRX': os.getenv('TRX_FEE_ADDY'),
+    'BNB': os.getenv('BNB_FEE_ADDY'),
+    'ATOM': os.getenv('ATOM_FEE_ADDY'),
+    'XLM': os.getenv('XLM_FEE_ADDY'),
+    'USDT-ERC20': os.getenv('USDT_ERC20_FEE_ADDY'),
+    'USDT-BEP20': os.getenv('USDT_BEP20_FEE_ADDY'),
+    'USDT-SOL': os.getenv('USDT_SOL_FEE_ADDY'),
+    'USDT-TRON': os.getenv('USDT_TRON_FEE_ADDY'),
+}
+
+# SwapKit Currency Mapping (Medius → SwapKit format)
+SWAPKIT_CURRENCY_MAPPING = {
+    'BTC': 'BTC.BTC',
+    'ETH': 'ETH.ETH',
+    'SOL': 'SOL.SOL',
+    'LTC': 'LTC.LTC',
+    'BCH': 'BCH.BCH',
+    'DOGE': 'DOGE.DOGE',
+    'XRP': 'XRP.XRP',
+    # 'ADA': 'ADA.ADA',  # EXCLUDED from exchange (no private key)
+    # 'DOT': 'DOT.DOT',  # EXCLUDED from exchange (no private key)
+    'MATIC': 'MATIC.MATIC',
+    'AVAX': 'AVAX.AVAX',
+    'TRX': 'TRX.TRX',
+    'BNB': 'BSC.BNB',
+    'ATOM': 'GAIA.ATOM',
+    'XLM': 'XLM.XLM',
+    'USDT-ERC20': 'ETH.USDT-0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    'USDT-BEP20': 'BSC.USDT-0x55d398326f99059fF775485246999027B3197955',
+    'USDT-SOL': 'SOL.USDT-Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+    'USDT-TRON': 'TRON.USDT-TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+}
+
+
+def is_exchange_supported(currency):
+    """
+    Check if currency is supported for SwapKit exchange
+    
+    Returns True for 13 currencies, False for ADA/DOT
+    """
+    return currency.upper() in EXCHANGE_SUPPORTED_CURRENCIES
+
+# List of currencies supported for exchange (for validation)
+EXCHANGE_SUPPORTED_CURRENCIES = list(SWAPKIT_CURRENCY_MAPPING.keys())
+
 
 
 
@@ -357,6 +451,22 @@ CHAIN_MAP = {
 # MIN_ESCROW_AMOUNT removed - frontend handles USD minimums, no need for crypto amount minimums
 MAX_ESCROW_AMOUNT = 10000000
 
+
+
+# ============================================
+# SWAPKIT EXCEPTIONS
+# ============================================
+
+class SwapKitError(Exception):
+    """Base SwapKit exception"""
+    pass
+
+class SwapKitAPIError(SwapKitError):
+    """SwapKit API error"""
+    def __init__(self, message, status_code=None, response=None):
+        self.status_code = status_code
+        self.response = response
+        super().__init__(message)
 
 
 # --------------------- Secret helpers (env -> supabase secrets fallback) ---------------------
@@ -437,6 +547,51 @@ def get_platform_address(currency: str):
         if alt:
             return alt
     return None
+
+
+
+# ============================================
+# AMOUNT DECIMALS + BASE UNIT CONVERSION
+# ============================================
+
+ASSET_DECIMALS = {
+    # natives
+    'BTC': 8,
+    'ETH': 18,
+    'SOL': 9,
+    'LTC': 8,
+    'BCH': 8,
+    'DOGE': 8,
+    'XRP': 6,   # drops
+    'MATIC': 18,
+    'AVAX': 18, # C-Chain
+    'TRX': 6,   # SUN
+    'BNB': 18,  # BSC
+    'ATOM': 6,  # uatom
+    'XLM': 7,   # stroops
+    # tokens
+    'USDT-ERC20': 6,
+    'USDT-BEP20': 18,
+    'USDT-SOL': 6,
+    'USDT-TRON': 6,
+}
+
+from decimal import Decimal, ROUND_DOWN
+
+def to_base_units(currency: str, amount: Decimal) -> str:
+    """
+    Convert a human-readable Decimal amount to an integer string in base units.
+    Example: ETH 1.0 -> "1000000000000000000"
+    """
+    currency = currency.upper().strip()
+    dec = ASSET_DECIMALS.get(currency)
+    if dec is None:
+        raise ValueError(f"No decimals configured for {currency}")
+    # scale and format as integer string
+    scaled = (amount * (Decimal(10) ** dec)).quantize(Decimal('1'), rounding=ROUND_DOWN)
+    return str(scaled)
+
+
 
 
 def get_fee_address(currency: str):
@@ -562,6 +717,9 @@ def validate_address(address, currency) -> tuple:
 def require_auth(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+    # allow CORS preflight OPTIONS to bypass auth
+        if request.method == 'OPTIONS':
+            return make_response('', 204)
         app.logger.info("=== AUTH CHECK START ===")
         app.logger.info(f"Request path: {request.path}")
         app.logger.info(f"Request method: {request.method}")
@@ -1032,89 +1190,571 @@ def get_usd_price(symbol: str):
         return None
 
 # --------------------- Platform -> Tatum helpers ---------------------
-def send_platform_crypto(currency: str, to_address: str, amount: float):
-    """Send payout from platform wallet to 'to_address' using Tatum."""
+# ========================================
+# UNIVERSAL CRYPTO SENDING (ALL CHAINS/TOKENS)
+# ========================================
+
+# Contract addresses for tokens
+TOKEN_CONTRACTS = {
+    'USDT-ERC20': '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    'USDC-ERC20': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    'USDT-BEP20': '0x55d398326f99059fF775485246999027B3197955',
+    'USDC-BEP20': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+    'USDT-TRON': 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+    'USDT-SOL': 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+    'USDC-SOL': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    'MATIC-POLYGON': '0x0000000000000000000000000000000000001010',
+    # Add more as needed
+}
+
+CHAIN_MAPPING = {
+    # Native coins
+    'BTC': 'bitcoin',
+    'ETH': 'ethereum',
+    'BNB': 'bsc',
+    'LTC': 'litecoin',
+    'DOGE': 'dogecoin',
+    'BCH': 'bitcoin-cash',
+    'SOL': 'solana',
+    'TRX': 'tron',
+    'XRP': 'xrp',
+    'ADA': 'cardano',
+    'DOT': 'polkadot',
+    'MATIC': 'polygon',
+    'AVAX': 'avax',
+    'ATOM': 'cosmos',
+    'XLM': 'stellar',
+    
+    # ERC20 tokens
+    'USDT-ERC20': 'ethereum',
+    'USDC-ERC20': 'ethereum',
+    
+    # BEP20 tokens
+    'USDT-BEP20': 'bsc',
+    'USDC-BEP20': 'bsc',
+    
+    # TRC20 tokens
+    'USDT-TRON': 'tron',
+    
+    # SPL tokens
+    'USDT-SOL': 'solana',
+    'USDC-SOL': 'solana',
+}
+
+def send_platform_crypto(currency: str, to_address: str, amount: float) -> Optional[str]:
+    """
+    Universal crypto sending function supporting all chains and tokens.
+    Uses Tatum API for maximum compatibility.
+    
+    Args:
+        currency: Currency code (e.g., 'BTC', 'ETH', 'USDT-ERC20')
+        to_address: Destination address
+        amount: Amount to send (in currency units)
+    
+    Returns:
+        Transaction hash if successful, None otherwise
+    """
     try:
-        currency = (currency or '').upper()
-        chain = CHAIN_MAP.get(currency)
+        chain = CHAIN_MAPPING.get(currency)
         if not chain:
-            app.logger.error("Unsupported payout currency %s", currency)
-            return False
-
-        if not TATUM_API_KEY:
-            app.logger.error("Missing TATUM_API_KEY")
-            return False
-
-        # Validate address
-        valid, error = validate_address(to_address, currency)
-        if not valid:
-            app.logger.error(f"Invalid address: {error}")
-            return False
-
-        headers = {'x-api-key': TATUM_API_KEY, 'Content-Type': 'application/json'}
-        mnemonic = get_platform_mnemonic(currency)
+            app.logger.error(f"Unsupported currency: {currency}")
+            return None
+        
+        # Get platform wallet details
+        mnemonic = os.getenv('MNEMONIC')
         if not mnemonic:
-            app.logger.error("Missing platform mnemonic for %s", currency)
-            return False
-
-        # derive private key via Tatum
-        priv_res = requests.post(f"{TATUM_API_URL}/{chain}/wallet/priv",
-                                 headers=headers, json={"mnemonic": mnemonic, "index": 0}, timeout=30)
-        if priv_res.status_code != 200:
-            app.logger.error("Privkey error: %s", priv_res.text)
-            return False
-        private_key = priv_res.json().get('key')
-        if not private_key:
-            app.logger.error("No private key returned from Tatum")
-            return False
-
-        # Native UTXO flows
-        if currency in ['BTC', 'LTC', 'BCH', 'DOGE']:
-            from_addr = get_platform_address(currency)
-            if not from_addr:
-                app.logger.error("Missing platform address for %s", currency)
-                return False
-            tx_data = {
-                "fromAddress": [{"address": from_addr, "privateKey": private_key}],
-                "to": [{"address": to_address, "value": float(amount)}]
-            }
-            send_url = f"{TATUM_API_URL}/{chain}/transaction"
-
-        # Native EVM-like (ETH, MATIC, BNB)
-        elif currency in ['ETH', 'MATIC', 'BNB']:
-            tx_data = {
-                "fromPrivateKey": private_key,
-                "to": to_address,
-                "amount": str(amount),
-                "currency": currency
-            }
-            send_url = f"{TATUM_API_URL}/{chain}/transaction"
-
-        # Token flows (USDT on EVM/BSC/Solana/Tron)
-        elif currency.startswith('USDT-') or currency == 'USDT':
-            # Map currency name to token symbol for Tatum (use 'USDT')
-            token_symbol = "USDT"
-            tx_data = {
-                "fromPrivateKey": private_key,
-                "to": to_address,
-                "amount": str(amount),
-                "currency": "USDT"
-            }
-            send_url = f"{TATUM_API_URL}/{chain}/transaction"
-
+            app.logger.error("MNEMONIC not configured")
+            return None
+        
+        headers = {
+            'x-api-key': TATUM_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        # Native coins (BTC, ETH, BNB, etc.)
+        if '-' not in currency:
+            return _send_native_coin(chain, currency, to_address, amount, mnemonic, headers)
+        
+        # Tokens (ERC20, BEP20, TRC20, SPL)
         else:
-            app.logger.error("Unsupported payout currency %s", currency)
-            return False
-
-        r = requests.post(send_url, headers=headers, json=tx_data, timeout=120)
-        if r.status_code == 200:
-            j = r.json()
-            return j.get('txId') or j.get('transactionHash')
-        app.logger.error("Tatum send failed: %s", r.text)
-        return False
+            return _send_token(chain, currency, to_address, amount, mnemonic, headers)
+        
     except Exception as e:
-        app.logger.exception("send_platform_crypto error")
-        return False
+        app.logger.error(f"send_platform_crypto error for {currency}: {e}")
+        return None
+
+def _send_native_coin(chain: str, currency: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send native blockchain coins (BTC, ETH, BNB, etc.)"""
+    try:
+        # Chain-specific implementations
+        if chain == 'bitcoin':
+            return _send_btc(to_address, amount, mnemonic, headers)
+        
+        elif chain in ['ethereum', 'bsc', 'polygon']:
+            return _send_evm_native(chain, to_address, amount, mnemonic, headers)
+        
+        elif chain == 'tron':
+            return _send_trx(to_address, amount, mnemonic, headers)
+        
+        elif chain == 'solana':
+            return _send_sol(to_address, amount, mnemonic, headers)
+        
+        elif chain == 'xrp':
+            return _send_xrp(to_address, amount, mnemonic, headers)
+        
+        elif chain == 'stellar':
+            return _send_xlm(to_address, amount, mnemonic, headers)
+        
+        elif chain in ['litecoin', 'dogecoin', 'bitcoin-cash']:
+            return _send_utxo_chain(chain, to_address, amount, mnemonic, headers)
+        
+        elif chain in ['cardano', 'polkadot', 'avax', 'cosmos']:
+            return _send_generic_native(chain, to_address, amount, mnemonic, headers)
+        
+        else:
+            app.logger.error(f"Native coin handler not implemented for {chain}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"Native coin send error: {e}")
+        return None
+
+def _send_token(chain: str, currency: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send tokens (ERC20, BEP20, TRC20, SPL)"""
+    try:
+        contract_address = TOKEN_CONTRACTS.get(currency)
+        if not contract_address:
+            app.logger.error(f"Contract address not configured for {currency}")
+            return None
+        
+        if chain in ['ethereum', 'bsc', 'polygon']:
+            return _send_evm_token(chain, contract_address, to_address, amount, mnemonic, headers)
+        
+        elif chain == 'tron':
+            return _send_trc20(contract_address, to_address, amount, mnemonic, headers)
+        
+        elif chain == 'solana':
+            return _send_spl_token(contract_address, to_address, amount, mnemonic, headers)
+        
+        else:
+            app.logger.error(f"Token handler not implemented for {chain}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"Token send error: {e}")
+        return None
+
+# ========================================
+# CHAIN-SPECIFIC IMPLEMENTATIONS
+# ========================================
+
+def _send_btc(to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send Bitcoin"""
+    try:
+        payload = {
+            'fromAddress': [{
+                'address': _derive_address('bitcoin', mnemonic, 0),
+                'privateKey': _derive_private_key('bitcoin', mnemonic, 0)
+            }],
+            'to': [{
+                'address': to_address,
+                'value': amount
+            }]
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/bitcoin/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"BTC send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"BTC send error: {e}")
+        return None
+
+def _send_evm_native(chain: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send native EVM coins (ETH, BNB, MATIC, AVAX)"""
+    try:
+        from_address = _derive_address(chain, mnemonic, 0)
+        private_key = _derive_private_key(chain, mnemonic, 0)
+        
+        payload = {
+            'to': to_address,
+            'amount': str(amount),
+            'currency': chain.upper() if chain != 'bsc' else 'BSC',
+            'fromPrivateKey': private_key
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/{chain}/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"EVM native send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"EVM native send error: {e}")
+        return None
+
+def _send_evm_token(chain: str, contract: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send ERC20/BEP20 tokens"""
+    try:
+        from_address = _derive_address(chain, mnemonic, 0)
+        private_key = _derive_private_key(chain, mnemonic, 0)
+        
+        # Determine decimals (most stablecoins use 6, but USDC on some chains uses 18)
+        decimals = 6 if 'USDT' in contract or 'USDC' in contract else 18
+        
+        payload = {
+            'to': to_address,
+            'amount': str(amount),
+            'contractAddress': contract,
+            'digits': decimals,
+            'fromPrivateKey': private_key
+        }
+        
+        endpoint = f"/v3/{chain}/erc20/transaction" if chain == 'ethereum' else f"/v3/{chain}/bep20/transaction"
+        
+        response = requests.post(
+            f"{TATUM_API_URL}{endpoint}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"EVM token send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"EVM token send error: {e}")
+        return None
+
+def _send_trx(to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send TRX (Tron native)"""
+    try:
+        from_address = _derive_address('tron', mnemonic, 0)
+        private_key = _derive_private_key('tron', mnemonic, 0)
+        
+        payload = {
+            'fromPrivateKey': private_key,
+            'to': to_address,
+            'amount': str(amount)
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/tron/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"TRX send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"TRX send error: {e}")
+        return None
+
+def _send_trc20(contract: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send TRC20 tokens (USDT-TRON)"""
+    try:
+        from_address = _derive_address('tron', mnemonic, 0)
+        private_key = _derive_private_key('tron', mnemonic, 0)
+        
+        payload = {
+            'fromPrivateKey': private_key,
+            'to': to_address,
+            'tokenAddress': contract,
+            'amount': str(amount),
+            'feeLimit': 100  # TRX fee limit
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/tron/trc20/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"TRC20 send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"TRC20 send error: {e}")
+        return None
+
+def _send_sol(to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send SOL (Solana native)"""
+    try:
+        from_address = _derive_address('solana', mnemonic, 0)
+        private_key = _derive_private_key('solana', mnemonic, 0)
+        
+        payload = {
+            'from': from_address,
+            'to': to_address,
+            'amount': str(amount),
+            'fromPrivateKey': private_key
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/solana/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"SOL send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"SOL send error: {e}")
+        return None
+
+def _send_spl_token(contract: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send SPL tokens (USDT-SOL, USDC-SOL)"""
+    try:
+        from_address = _derive_address('solana', mnemonic, 0)
+        private_key = _derive_private_key('solana', mnemonic, 0)
+        
+        payload = {
+            'from': from_address,
+            'to': to_address,
+            'amount': str(amount),
+            'tokenAddress': contract,
+            'fromPrivateKey': private_key
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/solana/spl/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"SPL send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"SPL send error: {e}")
+        return None
+
+def _send_xrp(to_address: str, amount: float, mnemonic: str, headers: dict, destination_tag: str = None) -> Optional[str]:
+    """Send XRP"""
+    try:
+        from_address = _derive_address('xrp', mnemonic, 0)
+        private_key = _derive_private_key('xrp', mnemonic, 0)
+        
+        payload = {
+            'fromAccount': from_address,
+            'to': to_address,
+            'amount': str(amount),
+            'fromSecret': private_key
+        }
+        
+        if destination_tag:
+            payload['destinationTag'] = int(destination_tag)
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/xrp/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"XRP send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"XRP send error: {e}")
+        return None
+
+def _send_xlm(to_address: str, amount: float, mnemonic: str, headers: dict, memo: str = None) -> Optional[str]:
+    """Send XLM (Stellar)"""
+    try:
+        from_address = _derive_address('stellar', mnemonic, 0)
+        private_key = _derive_private_key('stellar', mnemonic, 0)
+        
+        payload = {
+            'fromAccount': from_address,
+            'to': to_address,
+            'amount': str(amount),
+            'fromSecret': private_key
+        }
+        
+        if memo:
+            payload['message'] = memo
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/xlm/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"XLM send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"XLM send error: {e}")
+        return None
+
+def _send_utxo_chain(chain: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Send UTXO-based coins (LTC, DOGE, BCH)"""
+    try:
+        from_address = _derive_address(chain, mnemonic, 0)
+        private_key = _derive_private_key(chain, mnemonic, 0)
+        
+        payload = {
+            'fromAddress': [{
+                'address': from_address,
+                'privateKey': private_key
+            }],
+            'to': [{
+                'address': to_address,
+                'value': amount
+            }]
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/{chain}/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"{chain} send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"UTXO chain send error: {e}")
+        return None
+
+def _send_generic_native(chain: str, to_address: str, amount: float, mnemonic: str, headers: dict) -> Optional[str]:
+    """Generic handler for other native chains (ADA, DOT, AVAX, ATOM)"""
+    try:
+        from_address = _derive_address(chain, mnemonic, 0)
+        private_key = _derive_private_key(chain, mnemonic, 0)
+        
+        payload = {
+            'to': to_address,
+            'amount': str(amount),
+            'fromPrivateKey': private_key
+        }
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/{chain}/transaction",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('txId')
+        else:
+            app.logger.error(f"{chain} send failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        app.logger.error(f"Generic native send error: {e}")
+        return None
+
+# ========================================
+# WALLET DERIVATION HELPERS
+# ========================================
+
+def _derive_address(chain: str, mnemonic: str, index: int = 0) -> str:
+    """Derive address from mnemonic for any chain using Tatum"""
+    try:
+        headers = {'x-api-key': TATUM_API_KEY}
+        payload = {'mnemonic': mnemonic, 'index': index}
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/{chain}/wallet",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('address')
+        else:
+            raise Exception(f"Address derivation failed: {response.status_code}")
+            
+    except Exception as e:
+        app.logger.error(f"Address derivation error for {chain}: {e}")
+        raise
+
+def _derive_private_key(chain: str, mnemonic: str, index: int = 0) -> str:
+    """Derive private key from mnemonic for any chain using Tatum"""
+    try:
+        headers = {'x-api-key': TATUM_API_KEY}
+        payload = {'mnemonic': mnemonic, 'index': index}
+        
+        response = requests.post(
+            f"{TATUM_API_URL}/v3/{chain}/wallet/priv",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('key')
+        else:
+            raise Exception(f"Private key derivation failed: {response.status_code}")
+            
+    except Exception as e:
+        app.logger.error(f"Private key derivation error for {chain}: {e}")
+        raise
 
 
 @app.route('/api/upload/image', methods=['POST'])
@@ -1203,10 +1843,6 @@ def upload_image():
         return jsonify({'error': str(e)}), 500
 
 
-# --------------------- Health ---------------------
-@app.route('/health', methods=['GET'])
-def health_check_simple():
-    return jsonify({"status": "healthy"}), 200
 
 # --------------------- Supported currencies ---------------------
 @app.route('/api/supported-currencies', methods=['GET'])
@@ -3281,6 +3917,540 @@ def system_status():
     except Exception as e:
         app.logger.exception("system_status error")
         return jsonify({"error": str(e)}), 500
+
+
+
+
+# ============================================
+# ADMIN ENDPOINTS
+# ============================================
+
+@app.route('/api/admin/exchanges/stats', methods=['GET'])
+@require_admin
+def admin_exchange_stats():
+    """
+    Get exchange statistics for admin dashboard
+    
+    Query params:
+    - range: '24h', '7d', '30d' (default: '24h')
+    
+    Returns:
+    - Total exchanges
+    - Status breakdown
+    - Currency pairs
+    - Provider stats
+    - Volume estimates
+    """
+    try:
+        time_range = request.args.get('range', '24h')
+        
+        # Calculate time threshold
+        if time_range == '24h':
+            since = datetime.utcnow() - timedelta(hours=24)
+        elif time_range == '7d':
+            since = datetime.utcnow() - timedelta(days=7)
+        elif time_range == '30d':
+            since = datetime.utcnow() - timedelta(days=30)
+        else:
+            since = datetime.utcnow() - timedelta(hours=24)
+        
+        # Get exchanges in range
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .gte('created_at', since.isoformat())\
+            .execute()
+        
+        exchanges = result.data or []
+        total_count = len(exchanges)
+        
+        # Status breakdown
+        status_counts = {}
+        for ex in exchanges:
+            status = ex['status']
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Provider breakdown
+        provider_counts = {}
+        for ex in exchanges:
+            provider = ex.get('swapkit_provider', 'unknown')
+            if provider:
+                provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        
+        # Currency pairs
+        pair_counts = {}
+        for ex in exchanges:
+            pair = f"{ex['from_currency']}/{ex['to_currency']}"
+            pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        
+        # Top pairs
+        top_pairs = dict(sorted(pair_counts.items(), key=lambda x: x[1], reverse=True)[:10])
+        
+        # Calculate volume (simplified - just count of from_amount)
+        total_volume = {}
+        for ex in exchanges:
+            currency = ex['from_currency']
+            amount = Decimal(ex.get('from_amount', 0) or 0)
+            total_volume[currency] = total_volume.get(currency, Decimal('0')) + amount
+        
+        # Calculate fees collected
+        total_fees = {}
+        for ex in exchanges:
+            if ex['status'] == 'completed':
+                currency = ex['to_currency']
+                fee = Decimal(ex.get('platform_fee_amount', 0) or 0)
+                total_fees[currency] = total_fees.get(currency, Decimal('0')) + fee
+        
+        # Success rate
+        completed = status_counts.get('completed', 0)
+        failed = status_counts.get('failed', 0)
+        total_finished = completed + failed
+        success_rate = (completed / total_finished * 100) if total_finished > 0 else 0
+        
+        return jsonify({
+            'time_range': time_range,
+            'since': since.isoformat(),
+            'total_exchanges': total_count,
+            'status_breakdown': status_counts,
+            'provider_breakdown': provider_counts,
+            'top_pairs': top_pairs,
+            'total_volume': {k: str(v) for k, v in total_volume.items()},
+            'total_fees_collected': {k: str(v) for k, v in total_fees.items()},
+            'success_rate': round(success_rate, 2)
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin stats error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch stats'}), 500
+
+
+@app.route('/api/admin/exchanges/list', methods=['GET'])
+@require_admin
+def admin_list_exchanges():
+    """
+    List all exchanges with filters and pagination
+    
+    Query params:
+    - page: Page number (default 1)
+    - per_page: Items per page (default 50, max 100)
+    - status: Filter by status
+    - user_id: Filter by user
+    - from_currency: Filter by source currency
+    - to_currency: Filter by destination currency
+    - sort: Sort field (default: created_at)
+    - order: asc/desc (default: desc)
+    """
+    try:
+        # Pagination
+        page = int(request.args.get('page', 1))
+        per_page = min(int(request.args.get('per_page', 50)), 100)
+        offset = (page - 1) * per_page
+        
+        # Filters
+        status = request.args.get('status')
+        user_id = request.args.get('user_id')
+        from_currency = request.args.get('from_currency')
+        to_currency = request.args.get('to_currency')
+        
+        # Sorting
+        sort_field = request.args.get('sort', 'created_at')
+        sort_order = request.args.get('order', 'desc')
+        
+        # Validate sort field
+        valid_sort_fields = ['created_at', 'updated_at', 'from_amount', 'to_amount', 'status']
+        if sort_field not in valid_sort_fields:
+            sort_field = 'created_at'
+        
+        # Build query
+        query = supabase.table('crypto_exchanges')\
+            .select('*', count='exact')\
+            .order(sort_field, desc=(sort_order == 'desc'))\
+            .range(offset, offset + per_page - 1)
+        
+        # Apply filters
+        if status:
+            query = query.eq('status', status)
+        if user_id:
+            query = query.eq('user_id', user_id)
+        if from_currency:
+            query = query.eq('from_currency', from_currency.upper())
+        if to_currency:
+            query = query.eq('to_currency', to_currency.upper())
+        
+        result = query.execute()
+        
+        exchanges = result.data or []
+        total = result.count or 0
+        
+        return jsonify({
+            'exchanges': exchanges,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': (total + per_page - 1) // per_page
+            },
+            'filters': {
+                'status': status,
+                'user_id': user_id,
+                'from_currency': from_currency,
+                'to_currency': to_currency
+            }
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin list error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch exchanges'}), 500
+
+
+@app.route('/api/admin/exchanges/<exchange_id>', methods=['GET'])
+@require_admin
+def admin_get_exchange(exchange_id):
+    """
+    Get detailed exchange information (admin view)
+    
+    Includes:
+    - Full exchange data
+    - User information
+    - Wallet information
+    - Track history
+    - Full metadata
+    """
+    try:
+        # Get exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        
+        # Get user info
+        user_result = supabase.table('profiles')\
+            .select('id, username, email, created_at')\
+            .eq('id', exchange['user_id'])\
+            .single()\
+            .execute()
+        
+        user_info = user_result.data if user_result.data else None
+        
+        # Get wallet info if exists
+        wallet_result = supabase.table('escrow_wallets')\
+            .select('id, address, currency, created_at')\
+            .eq('address', exchange['deposit_address'])\
+            .execute()
+        
+        wallet_info = wallet_result.data[0] if wallet_result.data else None
+        
+        # Get track history
+        track_result = supabase.table('swapkit_track_log')\
+            .select('*')\
+            .eq('exchange_id', exchange_id)\
+            .order('checked_at', desc=True)\
+            .execute()
+        
+        track_history = track_result.data or []
+        
+        return jsonify({
+            'exchange': exchange,
+            'user': user_info,
+            'wallet': wallet_info,
+            'track_history': track_history,
+            'can_retry': exchange['status'] in ['failed', 'expired', 'rate_expired']
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin get exchange error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch exchange'}), 500
+
+@app.route('/api/admin/exchanges/<exchange_id>/retry', methods=['POST'])
+@require_admin
+def admin_retry_exchange(exchange_id):
+    """
+    Retry a failed exchange (admin only)
+    
+    Only works for exchanges in 'failed', 'expired', or 'rate_expired' status
+    
+    This resets the exchange to appropriate status for reprocessing
+    """
+    try:
+        # Get exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        
+        # Check if retryable
+        if exchange['status'] not in ['failed', 'expired', 'rate_expired']:
+            return jsonify({'error': f'Cannot retry exchange with status: {exchange["status"]}'}), 400
+        
+        # Determine new status based on current state
+        if exchange.get('deposit_tx_hash'):
+            # Deposit was made, retry from swapping
+            new_status = 'swapping'
+        elif exchange.get('deposit_detected_at'):
+            # Deposit detected but not forwarded
+            new_status = 'deposit_detected'
+        else:
+            # No deposit yet, back to pending
+            new_status = 'pending'
+        
+        # Reset exchange
+        supabase.table('crypto_exchanges').update({
+            'status': new_status,
+            'error_message': None,
+            'error_code': None,
+            'retry_count': (exchange.get('retry_count', 0) or 0) + 1,
+            'last_retry_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.utcnow().isoformat()
+        }).eq('id', exchange_id).execute()
+        
+        app.logger.info(f"Admin retry: Exchange {exchange_id} reset to {new_status}")
+        
+        return jsonify({
+            'status': 'ok',
+            'message': f'Exchange reset to {new_status}',
+            'new_status': new_status
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin retry error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to retry exchange'}), 500
+
+@app.route('/api/admin/exchanges/track-logs', methods=['GET'])
+@require_admin
+def admin_get_track_logs():
+    """
+    Get SwapKit track polling logs
+    
+    Query params:
+    - page: Page number
+    - per_page: Items per page
+    - exchange_id: Filter by exchange
+    """
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = min(int(request.args.get('per_page', 50)), 100)
+        offset = (page - 1) * per_page
+        
+        exchange_id = request.args.get('exchange_id')
+        
+        query = supabase.table('swapkit_track_log')\
+            .select('*', count='exact')\
+            .order('checked_at', desc=True)\
+            .range(offset, offset + per_page - 1)
+        
+        if exchange_id:
+            query = query.eq('exchange_id', exchange_id)
+        
+        result = query.execute()
+        
+        return jsonify({
+            'logs': result.data or [],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': result.count or 0
+            }
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin track logs error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch logs'}), 500
+
+@app.route('/api/admin/exchanges/<exchange_id>/force-status', methods=['POST'])
+@require_admin
+def admin_force_status(exchange_id):
+    """
+    Force update exchange status (admin emergency action)
+    
+    Request body:
+    {
+        "status": "completed",
+        "reason": "Manual completion after verification"
+    }
+    """
+    try:
+        data = request.json or {}
+        new_status = data.get('status')
+        reason = data.get('reason', 'Admin forced status change')
+        
+        if not new_status:
+            return jsonify({'error': 'status required'}), 400
+        
+        # Validate status
+        valid_statuses = [
+            'pending', 'deposit_detected', 'confirming', 'swapping', 
+            'swap_complete', 'completed', 'failed', 'expired', 'rate_expired', 'refunded'
+        ]
+        
+        if new_status not in valid_statuses:
+            return jsonify({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+        
+        # Get exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        old_status = exchange['status']
+        
+        # Update
+        updates = {
+            'status': new_status,
+            'updated_at': datetime.utcnow().isoformat(),
+            'metadata': {
+                **exchange.get('metadata', {}),
+                'admin_force_status': {
+                    'old_status': old_status,
+                    'new_status': new_status,
+                    'reason': reason,
+                    'admin_id': str(request.user_id),
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            }
+        }
+        
+        # If forcing to completed, set completed_at
+        if new_status == 'completed' and not exchange.get('completed_at'):
+            updates['completed_at'] = datetime.utcnow().isoformat()
+        
+        supabase.table('crypto_exchanges').update(updates).eq('id', exchange_id).execute()
+        
+        app.logger.warning(f"Admin {request.user_id} forced exchange {exchange_id}: {old_status} → {new_status}. Reason: {reason}")
+        
+        return jsonify({
+            'status': 'ok',
+            'message': f'Status updated from {old_status} to {new_status}',
+            'old_status': old_status,
+            'new_status': new_status
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Admin force status error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to update status'}), 500
+
+
+# ============================================
+# HEALTH & STATUS ENDPOINTS
+# ============================================
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    System health check endpoint
+    
+    Checks:
+    - Database connectivity
+    - SwapKit API status
+    - Background monitor status (if applicable)
+    
+    Returns:
+    - healthy/unhealthy
+    - Service statuses
+    - Version info
+    """
+    try:
+        health_status = {
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'services': {},
+            'version': '1.0.0'
+        }
+        
+        # Check database
+        try:
+            supabase.table('profiles').select('id').limit(1).execute()
+            health_status['services']['database'] = 'ok'
+        except Exception as e:
+            health_status['services']['database'] = f'error: {str(e)}'
+            health_status['status'] = 'unhealthy'
+        
+        # Check SwapKit API
+        try:
+            swapkit_request('GET', '/providers')
+            health_status['services']['swapkit'] = 'ok'
+        except Exception as e:
+            health_status['services']['swapkit'] = f'error: {str(e)}'
+            health_status['status'] = 'degraded'
+        
+        # Check Tatum (if configured)
+        if os.getenv('TATUM_API_KEY'):
+            health_status['services']['tatum'] = 'configured'
+        else:
+            health_status['services']['tatum'] = 'not_configured'
+        
+        # Get recent exchange stats
+        try:
+            recent = supabase.table('crypto_exchanges')\
+                .select('status', count='exact')\
+                .gte('created_at', (datetime.utcnow() - timedelta(hours=1)).isoformat())\
+                .execute()
+            
+            health_status['recent_activity'] = {
+                'last_hour_exchanges': recent.count or 0
+            }
+        except:
+            pass
+        
+        status_code = 200 if health_status['status'] == 'healthy' else 503
+        
+        return jsonify(health_status), status_code
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }), 503
+
+@app.route('/api/exchange/status-summary', methods=['GET'])
+@require_admin
+def exchange_status_summary():
+    """
+    Quick status summary for monitoring dashboard
+    """
+    try:
+        # Count by status
+        result = supabase.table('crypto_exchanges')\
+            .select('status', count='exact')\
+            .execute()
+        
+        # Group by status
+        status_counts = {}
+        for ex in result.data or []:
+            status = ex['status']
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Active exchanges (pending, swapping, etc)
+        active_statuses = ['pending', 'deposit_detected', 'confirming', 'swapping', 'swap_complete']
+        active_count = sum(status_counts.get(s, 0) for s in active_statuses)
+        
+        return jsonify({
+            'total': result.count or 0,
+            'active': active_count,
+            'by_status': status_counts,
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Status summary error: {e}")
+        return jsonify({'error': 'Failed to fetch summary'}), 500
+
 
 # --------------------- Admin Debug Endpoint ---------------------
 @app.route('/api/admin/debug', methods=['GET'])
@@ -5363,6 +6533,11 @@ def cart_add():
         lr = supabase.table('listings').select('id, seller_id, price_usd, accept_all').eq('id', listing_id).single().execute()
         if not lr.data:
             return jsonify({'error': 'Listing not found'}), 404
+
+        # Prevent users from adding their own items to cart
+        if lr.data.get('seller_id') == uid:
+            app.logger.info(f"User {uid} tried to add their own listing {listing_id} to cart")
+            return jsonify({'error': 'You cannot add your own item to cart'}), 400
         if payment_method == 'crypto':
             if not selected_currency:
                 return jsonify({'error': 'selected_currency required for crypto'}), 400
@@ -5965,82 +7140,6 @@ def calculate_fee_public():
         return jsonify({"error": "Invalid payment method"}), 400
         
 # --------------------- Run ---------------------
-if __name__ == '__main__':
-    # Sanity checks
-    missing = []
-    critical = ['SUPABASE_URL','SUPABASE_SERVICE_KEY','SUPABASE_JWT_SECRET']
-    for k in critical:
-        if not os.getenv(k):
-            missing.append(k)
-    if missing:
-        app.logger.error("CRITICAL: Missing required env vars: %s", missing)
-        print(f"ERROR: Missing critical environment variables: {missing}")
-        print("Please set these before starting the server.")
-        exit(1)
-    
-    # Warnings for optional but recommended
-    warnings = []
-    if not TATUM_API_KEY:
-        warnings.append("TATUM_API_KEY (crypto disabled)")
-    if not PAYPAL_CLIENT_ID:
-        warnings.append("PAYPAL_CLIENT_ID (PayPal disabled)")
-    
-    if warnings:
-        app.logger.warning("Missing optional env vars: %s", warnings)
-        print(f"WARNING: Missing optional configuration: {warnings}")
-    
-    # Check database tables exist
-    try:
-        test = supabase.table('profiles').select('id').limit(1).execute()
-        print("✓ Database connection successful")
-    except Exception as e:
-        print(f"ERROR: Cannot connect to database: {e}")
-        print("Please run the migration SQL first.")
-        exit(1)
-    
-    # Determine port early so we can optionally expose it via ngrok
-    port = int(os.getenv('PORT', 5000))
-    print(f"Starting Medius API server on port {port}")
-    print(f"Frontend URL: {FRONTEND_URL}")
-    print(f"Referral rate: {REFERRAL_RATE * 100}%")
-    print(f"Min withdrawal: ${MIN_WITHDRAW_USD}")
-    
-    # Optionally start an ngrok tunnel for local development
-    use_ngrok = ((os.getenv('USE_NGROK') or '').lower() in ('1', 'true', 'yes'))
-    if use_ngrok:
-        try:
-            # Import here so production without pyngrok still works
-            from pyngrok import ngrok, conf as ngrok_conf
-
-            # Optional auth token and region
-            token = os.getenv('NGROK_AUTHTOKEN')
-            if token:
-                try:
-                    ngrok.set_auth_token(token)
-                except Exception:
-                    pass
-            region = os.getenv('NGROK_REGION')
-            if region:
-                try:
-                    cfg = ngrok_conf.get_default()
-                    cfg.region = region
-                except Exception:
-                    pass
-
-            tunnel = ngrok.connect(addr=port, proto='http', bind_tls=True)
-            public_url = tunnel.public_url
-            print(f"✓ ngrok tunnel active: {public_url} -> http://localhost:{port}")
-            # Ensure tunnel is closed on process exit
-            atexit.register(ngrok.kill)
-        except Exception as e:
-            print(f"WARNING: Failed to start ngrok tunnel: {e}")
-    
-    app.run(
-        debug=os.getenv('FLASK_ENV') == 'development',
-        port=port,
-        host='0.0.0.0'
-    )
-
 @app.route('/api/marketplace/search/log', methods=['POST'])
 @require_auth
 @limiter.limit("300 per hour")
@@ -6192,3 +7291,2664 @@ def marketplace_hot_products():
     except Exception as e:
         app.logger.exception("marketplace_hot_products error")
         return jsonify({'error': str(e)}), 500
+
+# ===========================================
+# ANALYTICS SYSTEM - INTEGRATED INTO APP.PY
+# ===========================================
+
+# Analytics helper functions
+def get_listing_analytics_summary(listing_id: str) -> dict:
+    """Get summary analytics for a listing"""
+    try:
+        # Check cache first
+        cache_key = f"summary:{listing_id}"
+        cached = get_cached_analytics(listing_id, cache_key)
+        if cached:
+            return cached
+
+        # Get basic metrics
+        views_result = supabase.table('listing_views').select('id', count='exact').eq('listing_id', listing_id).execute()
+        total_views = views_result.count or 0
+
+        # Unique viewers
+        unique_result = supabase.table('listing_views').select('viewer_id', count='exact').eq('listing_id', listing_id).execute()
+        unique_viewers = len(set(v['viewer_id'] for v in unique_result.data if v['viewer_id'])) if unique_result.data else 0
+
+        # Sales count
+        sales_result = supabase.table('escrows').select('id', count='exact').eq('listing_id', listing_id).eq('status', 'completed').execute()
+        total_sales = sales_result.count or 0
+
+        # Average sale price
+        avg_price_result = supabase.table('escrows').select('amount_usd').eq('listing_id', listing_id).eq('status', 'completed').execute()
+        avg_sale_price = 0
+        if avg_price_result.data:
+            prices = [escrow['amount_usd'] for escrow in avg_price_result.data if escrow['amount_usd']]
+            avg_sale_price = sum(prices) / len(prices) if prices else 0
+
+        # Last viewed
+        last_view_result = supabase.table('listing_views').select('viewed_at').eq('listing_id', listing_id).order('viewed_at', desc=True).limit(1).execute()
+        last_viewed = last_view_result.data[0]['viewed_at'] if last_view_result.data else None
+
+        # Views last 7 days
+        seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        views_7d_result = supabase.table('listing_views').select('id', count='exact').eq('listing_id', listing_id).gte('viewed_at', seven_days_ago).execute()
+        views_last_7d = views_7d_result.count or 0
+
+        # Sales last 7 days
+        sales_7d_result = supabase.table('escrows').select('id', count='exact').eq('listing_id', listing_id).eq('status', 'completed').gte('created_at', seven_days_ago).execute()
+        sales_last_7d = sales_7d_result.count or 0
+
+        # Conversion rate
+        conversion_rate = (total_sales / total_views * 100) if total_views > 0 else 0
+
+        summary = {
+            'total_views': total_views,
+            'unique_viewers': unique_viewers,
+            'total_sales': total_sales,
+            'conversion_rate': round(conversion_rate, 2),
+            'avg_sale_price': round(avg_sale_price, 2),
+            'last_viewed': last_viewed,
+            'views_last_7d': views_last_7d,
+            'sales_last_7d': sales_last_7d
+        }
+
+        # Cache for 1 hour
+        set_cached_analytics(listing_id, cache_key, summary, 3600)
+        return summary
+
+    except Exception as e:
+        app.logger.error(f"Error getting analytics summary: {e}")
+        return {
+            'total_views': 0,
+            'unique_viewers': 0,
+            'total_sales': 0,
+            'conversion_rate': 0,
+            'avg_sale_price': 0,
+            'last_viewed': None,
+            'views_last_7d': 0,
+            'sales_last_7d': 0
+        }
+
+def get_view_trends(listing_id: str, date_range: str = '30d', granularity: str = 'daily') -> list:
+    """Get view trends over time"""
+    try:
+        days = parse_date_range(date_range)
+        start_date = (datetime.now() - timedelta(days=days)).isoformat()
+
+        views_result = supabase.table('listing_views')\
+            .select('viewed_at')\
+            .eq('listing_id', listing_id)\
+            .gte('viewed_at', start_date)\
+            .execute()
+
+        if not views_result.data:
+            return []
+
+        # Group by date
+        trends = {}
+        for view in views_result.data:
+            view_date = datetime.fromisoformat(view['viewed_at'].replace('Z', '+00:00')).date()
+            date_str = view_date.isoformat()
+            trends[date_str] = trends.get(date_str, 0) + 1
+
+        # Fill in missing dates
+        result = []
+        current_date = (datetime.now() - timedelta(days=days)).date()
+        end_date = datetime.now().date()
+
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            result.append({
+                'date': date_str,
+                'views': trends.get(date_str, 0)
+            })
+            current_date += timedelta(days=1)
+
+        return result
+
+    except Exception as e:
+        app.logger.error(f"Error getting view trends: {e}")
+        return []
+
+def get_geographic_data(listing_id: str, date_range: str = '30d') -> list:
+    """Get views by country"""
+    try:
+        days = parse_date_range(date_range)
+        start_date = (datetime.now() - timedelta(days=days)).isoformat()
+
+        geo_result = supabase.table('listing_views')\
+            .select('country_code')\
+            .eq('listing_id', listing_id)\
+            .gte('viewed_at', start_date)\
+            .execute()
+
+        if not geo_result.data:
+            return []
+
+        # Count by country
+        country_counts = {}
+        total = 0
+        for view in geo_result.data:
+            country = view['country_code'] or 'Unknown'
+            country_counts[country] = country_counts.get(country, 0) + 1
+            total += 1
+
+        return [
+            {
+                'country': country,
+                'views': count,
+                'percentage': round((count / total) * 100, 1) if total > 0 else 0
+            }
+            for country, count in sorted(country_counts.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+    except Exception as e:
+        app.logger.error(f"Error getting geographic data: {e}")
+        return []
+
+def get_traffic_sources(listing_id: str, date_range: str = '30d') -> list:
+    """Get traffic source breakdown"""
+    try:
+        days = parse_date_range(date_range)
+        start_date = (datetime.now() - timedelta(days=days)).isoformat()
+
+        sources_result = supabase.table('listing_views')\
+            .select('source')\
+            .eq('listing_id', listing_id)\
+            .gte('viewed_at', start_date)\
+            .execute()
+
+        if not sources_result.data:
+            return []
+
+        # Count by source
+        source_counts = {}
+        total = 0
+        for view in sources_result.data:
+            source = view['source'] or 'direct'
+            source_counts[source] = source_counts.get(source, 0) + 1
+            total += 1
+
+        return [
+            {
+                'source': source,
+                'views': count,
+                'percentage': round((count / total) * 100, 1) if total > 0 else 0
+            }
+            for source, count in sorted(source_counts.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+    except Exception as e:
+        app.logger.error(f"Error getting traffic sources: {e}")
+        return []
+
+def get_conversion_funnel(listing_id: str, date_range: str = '30d') -> dict:
+    """Get conversion funnel data"""
+    try:
+        days = parse_date_range(date_range)
+        start_date = (datetime.now() - timedelta(days=days)).isoformat()
+
+        # Views
+        views_result = supabase.table('listing_views').select('id', count='exact').eq('listing_id', listing_id).gte('viewed_at', start_date).execute()
+        views = views_result.count or 0
+
+        # Add to cart events
+        cart_result = supabase.table('analytics_events').select('id', count='exact').eq('listing_id', listing_id).eq('event_type', 'add_to_cart').gte('created_at', start_date).execute()
+        cart_adds = cart_result.count or 0
+
+        # Completed sales
+        sales_result = supabase.table('escrows').select('id', count='exact').eq('listing_id', listing_id).eq('status', 'completed').gte('created_at', start_date).execute()
+        sales = sales_result.count or 0
+
+        return {
+            'views': views,
+            'cart_adds': cart_adds,
+            'sales': sales,
+            'view_to_cart_rate': round((cart_adds / views * 100), 1) if views > 0 else 0,
+            'cart_to_sale_rate': round((sales / cart_adds * 100), 1) if cart_adds > 0 else 0,
+            'overall_conversion': round((sales / views * 100), 1) if views > 0 else 0
+        }
+
+    except Exception as e:
+        app.logger.error(f"Error getting conversion funnel: {e}")
+        return {
+            'views': 0,
+            'cart_adds': 0,
+            'sales': 0,
+            'view_to_cart_rate': 0,
+            'cart_to_sale_rate': 0,
+            'overall_conversion': 0
+        }
+
+def parse_date_range(date_range: str) -> int:
+    """Parse date range string to days"""
+    ranges = {'7d': 7, '30d': 30, '90d': 90, '1y': 365}
+    return ranges.get(date_range, 30)
+
+def get_cached_analytics(listing_id: str, cache_key: str) -> dict:
+    """Get cached analytics data"""
+    try:
+        cache_result = supabase.table('listing_analytics_cache')\
+            .select('data,expires_at')\
+            .eq('listing_id', listing_id)\
+            .eq('cache_key', cache_key)\
+            .single().execute()
+
+        if cache_result.data:
+            expires_at = datetime.fromisoformat(cache_result.data['expires_at'])
+            if expires_at > datetime.now():
+                return cache_result.data['data']
+
+        return None
+    except:
+        return None
+
+def set_cached_analytics(listing_id: str, cache_key: str, data: dict, ttl_seconds: int = 3600):
+    """Cache analytics data"""
+    try:
+        expires_at = datetime.now() + timedelta(seconds=ttl_seconds)
+
+        supabase.table('listing_analytics_cache').upsert({
+            'listing_id': listing_id,
+            'cache_key': cache_key,
+            'data': data,
+            'expires_at': expires_at.isoformat()
+        }).execute()
+    except Exception as e:
+        app.logger.error(f"Error caching analytics: {e}")
+
+def verify_listing_ownership(listing_id: str, user_id: str) -> bool:
+    """Verify user owns the listing"""
+    try:
+        result = supabase.table('listings')\
+            .select('seller_id')\
+            .eq('id', listing_id)\
+            .single().execute()
+
+        return result.data['seller_id'] == user_id
+    except:
+        return False
+
+def generate_session_id() -> str:
+    """Generate a unique session ID"""
+    return str(uuid.uuid4())
+
+def get_country_from_ip(ip_address: str) -> str:
+    """Get country code from IP address"""
+    if not ip_address or ip_address == '127.0.0.1':
+        return None
+
+    try:
+        import requests
+        response = requests.get(f'http://ipapi.co/{ip_address}/country/', timeout=2)
+        if response.status_code == 200:
+            return response.text[:2].upper()
+    except:
+        pass
+
+    return None
+
+def detect_traffic_source(referrer: str) -> str:
+    """Detect traffic source from referrer URL"""
+    if not referrer:
+        return 'direct'
+
+    referrer_lower = referrer.lower()
+
+    # Social media
+    if any(domain in referrer_lower for domain in ['facebook.com', 'twitter.com', 'instagram.com', 'linkedin.com']):
+        return 'social'
+
+    # Search engines
+    if any(domain in referrer_lower for domain in ['google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com']):
+        return 'search'
+
+    # Other
+    return 'referral'
+
+# ===========================================
+# ANALYTICS API ENDPOINTS
+# ===========================================
+
+@app.route('/api/marketplace/seller/products/get', methods=['GET','OPTIONS'])
+@require_auth
+@limiter.limit("50 per minute")
+def get_seller_products():
+    """Get seller's products with analytics summary"""
+    app.logger.info(f"=== SELLER PRODUCTS ROUTE HIT === method={request.method} path={request.path}")
+    
+    # Debug logging for headers (remove in production)
+    app.logger.info(f"Request headers: {dict(request.headers)}")
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        app.logger.info(f"Auth header present: {auth_header[:20]}...")  # Log first 20 chars
+    else:
+        app.logger.warning("No Authorization header found in request!")
+    
+    # Auth is handled by @require_auth decorator - it should set request.user_id
+    try:
+        user_id = request.user_id
+        app.logger.info(f"Authenticated user_id: {user_id}")
+    except AttributeError:
+        app.logger.error("request.user_id not set - @require_auth decorator may have failed")
+        return jsonify({"error": "Authentication required", "hint": "Include 'Authorization: Bearer YOUR_TOKEN' header"}), 401
+
+    page = request.args.get('page', default=1, type=int) or 1
+    limit = request.args.get('limit', default=20, type=int) or 20
+
+    app.logger.info(f"User ID: {user_id}, Page: {page}, Limit: {limit}")
+
+    try:
+        # Get seller's listings with basic info
+        offset = (page - 1) * limit
+        app.logger.info(f"Querying listings for user {user_id}, offset: {offset}, limit: {limit}")
+        
+        listings_result = (
+            supabase.table('listings')
+            .select('id,title,status,price_usd,created_at,updated_at')
+            .eq('seller_id', user_id)
+            .order('updated_at', desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+
+        listings = listings_result.data or []
+        app.logger.info(f"Found {len(listings)} listings")
+
+        # Enrich with analytics data
+        products = []
+        for i, listing in enumerate(listings):
+            app.logger.info(f"Processing listing {i+1}/{len(listings)}: {listing['id']} - {listing.get('title')}")
+            
+            # Get analytics summary
+            analytics = get_listing_analytics_summary(listing['id'])
+            app.logger.info(f"Analytics for listing {listing['id']}: {analytics}")
+
+            # Get escrow counts
+            escrow_result = (
+                supabase.table('escrows')
+                .select('id', count='exact')
+                .eq('listing_id', listing['id'])
+                .eq('seller_id', user_id)
+                .execute()
+            )
+            escrows_count = escrow_result.count or 0
+            app.logger.info(f"Escrow count for listing {listing['id']}: {escrows_count}")
+
+            listing_with_analytics = {
+                **listing,
+                'analytics': analytics,
+                'escrows_count': escrows_count,
+            }
+            products.append(listing_with_analytics)
+
+        # Get total count for pagination
+        total_result = (
+            supabase.table('listings')
+            .select('id', count='exact')
+            .eq('seller_id', user_id)
+            .execute()
+        )
+        total_count = total_result.count or 0
+
+        response_data = {
+            'products': products,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'total_pages': (total_count + limit - 1) // limit if limit > 0 else 0
+            }
+        }
+
+        app.logger.info(f"Returning {len(products)} products with pagination info")
+        app.logger.info("=== SELLER PRODUCTS ENDPOINT COMPLETED SUCCESSFULLY ===")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        app.logger.error("=== ERROR IN SELLER PRODUCTS ENDPOINT ===")
+        app.logger.error(f"Error fetching seller products: {e}")
+        app.logger.error(f"Error type: {type(e).__name__}")
+        app.logger.error(f"Traceback: {traceback.format_exc()}")
+        app.logger.error("=== END ERROR LOG ===")
+        return jsonify({"error": "Failed to fetch products", "details": str(e)}), 500
+
+
+@app.route('/api/marketplace/seller/products/', methods=['GET','OPTIONS'])
+def _test_get():
+    return jsonify({'ok': True}), 200
+
+
+@app.route('/api/marketplace/<uuid:listing_id>/analytics', methods=['GET'])
+@require_auth
+@analytics_limiter.limit("30 per minute")
+def get_product_analytics(listing_id):
+    """Get detailed analytics for specific product"""
+    user_id = request.user_id
+    date_range = request.args.get('range', '30d')
+    granularity = request.args.get('granularity', 'daily')
+
+    try:
+        # Verify ownership
+        if not verify_listing_ownership(str(listing_id), user_id):
+            return jsonify({"error": "Unauthorized"}), 403
+
+        # Get comprehensive analytics data
+        analytics_data = {
+            'overview': get_listing_analytics_summary(str(listing_id)),
+            'trends': get_view_trends(str(listing_id), date_range, granularity),
+            'geography': get_geographic_data(str(listing_id), date_range),
+            'traffic_sources': get_traffic_sources(str(listing_id), date_range),
+            'conversion_funnel': get_conversion_funnel(str(listing_id), date_range)
+        }
+
+        return jsonify(analytics_data)
+
+    except Exception as e:
+        app.logger.error(f"Error fetching product analytics: {e}")
+        return jsonify({"error": "Failed to fetch analytics"}), 500
+
+@app.route('/api/marketplace/<uuid:listing_id>/track-view', methods=['POST'])
+@analytics_limiter.limit("200 per minute")  # Higher limit for tracking
+def track_listing_view(listing_id):
+    """Track when a listing is viewed"""
+    data = request.json or {}
+
+    try:
+        # Extract tracking data
+        session_id = data.get('session_id', generate_session_id())
+        ip_address = request.remote_addr or data.get('ip_address')
+        country_code = get_country_from_ip(ip_address)
+        referrer = data.get('referrer') or request.headers.get('Referer')
+        source = detect_traffic_source(referrer)
+
+        view_data = {
+            'listing_id': str(listing_id),
+            'viewer_id': getattr(request, 'user_id', None),
+            'session_id': session_id,
+            'ip_address': ip_address,
+            'user_agent': request.headers.get('User-Agent'),
+            'referrer_url': referrer,
+            'country_code': country_code,
+            'source': source,
+            'campaign_id': data.get('campaign_id'),
+            'search_query': data.get('search_query'),
+            'viewed_at': datetime.now().isoformat()
+        }
+
+        # Insert view record
+        supabase.table('listing_views').insert(view_data).execute()
+
+        # Track additional events if applicable
+        if data.get('event_type'):
+            event_data = {
+                'event_type': data['event_type'],
+                'listing_id': str(listing_id),
+                'user_id': getattr(request, 'user_id', None),
+                'session_id': session_id,
+                'event_data': data.get('event_data', {}),
+                'created_at': datetime.now().isoformat()
+            }
+            supabase.table('analytics_events').insert(event_data).execute()
+
+        # Invalidate cache
+        cache_key = f"summary:{listing_id}"
+        supabase.table('listing_analytics_cache')\
+            .delete()\
+            .eq('listing_id', str(listing_id))\
+            .eq('cache_key', cache_key)\
+            .execute()
+
+        return jsonify({"success": True})
+
+    except Exception as e:
+        app.logger.error(f"Error tracking view: {e}")
+        return jsonify({"error": "Failed to track view"}), 500
+
+@app.route('/api/marketplace/<uuid:listing_id>/analytics/export', methods=['GET'])
+@require_auth
+@analytics_limiter.limit("10 per minute")  # Lower limit for exports
+def export_product_analytics(listing_id):
+    """Export analytics data as CSV or JSON"""
+    user_id = request.user_id
+    format_type = request.args.get('format', 'csv')  # csv, json
+    date_range = request.args.get('range', '30d')
+
+    try:
+        # Verify ownership
+        if not verify_listing_ownership(str(listing_id), user_id):
+            return jsonify({"error": "Unauthorized"}), 403
+
+        if format_type == 'csv':
+            csv_data = generate_analytics_csv(str(listing_id), date_range)
+            response = make_response(csv_data)
+            response.headers['Content-Type'] = 'text/csv'
+            response.headers['Content-Disposition'] = f'attachment; filename=analytics-{listing_id}.csv'
+            return response
+        else:
+            json_data = generate_analytics_json(str(listing_id), date_range)
+            response = make_response(json.dumps(json_data, indent=2))
+            response.headers['Content-Type'] = 'application/json'
+            response.headers['Content-Disposition'] = f'attachment; filename=analytics-{listing_id}.json'
+            return response
+
+    except Exception as e:
+        app.logger.error(f"Error exporting analytics: {e}")
+        return jsonify({"error": "Failed to export analytics"}), 500
+
+@app.route('/api/marketplace/<uuid:listing_id>/escrows', methods=['GET'])
+@require_auth
+@analytics_limiter.limit("30 per minute")
+def get_product_escrows(listing_id):
+    """Get escrows for specific product with analytics"""
+    user_id = request.user_id
+    status_filter = request.args.get('status')
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 20))
+
+    try:
+        # Verify ownership
+        if not verify_listing_ownership(str(listing_id), user_id):
+            return jsonify({"error": "Unauthorized"}), 403
+
+        # Build escrow query
+        query = supabase.table('escrows')\
+            .select('id,status,amount_usd,currency,payment_method,buyer_id,created_at')\
+            .eq('listing_id', str(listing_id))\
+            .eq('seller_id', user_id)\
+            .order('created_at', desc=True)
+
+        if status_filter:
+            query = query.eq('status', status_filter)
+
+        offset = (page - 1) * limit
+        escrows_result = query.range(offset, offset + limit - 1).execute()
+
+        # Enrich with buyer data
+        escrows = []
+        for escrow in escrows_result.data:
+            # Get buyer username
+            buyer_result = supabase.table('profiles')\
+                .select('username')\
+                .eq('id', escrow['buyer_id'])\
+                .single().execute()
+
+            escrow_data = {
+                **escrow,
+                'buyer_username': buyer_result.data.get('username', 'Unknown') if buyer_result.data else 'Unknown'
+            }
+            escrows.append(escrow_data)
+
+        # Get total count
+        total_query = supabase.table('escrows')\
+            .select('id', count='exact')\
+            .eq('listing_id', str(listing_id))\
+            .eq('seller_id', user_id)
+
+        if status_filter:
+            total_query = total_query.eq('status', status_filter)
+
+        total_result = total_query.execute()
+
+        return jsonify({
+            'escrows': escrows,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_result.count or 0,
+                'total_pages': (total_result.count or 0 + limit - 1) // limit
+            }
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error fetching product escrows: {e}")
+        return jsonify({"error": "Failed to fetch escrows"}), 500
+
+def generate_analytics_csv(listing_id: str, date_range: str) -> str:
+    """Generate CSV export of analytics data"""
+    from io import StringIO
+    import csv
+
+    # Get analytics data
+    overview = get_listing_analytics_summary(listing_id)
+    trends = get_view_trends(listing_id, date_range, 'daily')
+    geography = get_geographic_data(listing_id, date_range)
+    sources = get_traffic_sources(listing_id, date_range)
+
+    # Create CSV content
+    output = StringIO()
+    writer = csv.writer(output)
+
+    # Overview section
+    writer.writerow(['Analytics Report'])
+    writer.writerow(['Generated:', datetime.now().isoformat()])
+    writer.writerow(['Date Range:', date_range])
+    writer.writerow([])
+
+    writer.writerow(['Overview Metrics'])
+    writer.writerow(['Metric', 'Value'])
+    writer.writerow(['Total Views', overview['total_views']])
+    writer.writerow(['Unique Viewers', overview['unique_viewers']])
+    writer.writerow(['Total Sales', overview['total_sales']])
+    writer.writerow(['Conversion Rate', f"{overview['conversion_rate']:.2f}%"])
+    writer.writerow(['Average Sale Price', f"${overview['avg_sale_price']:.2f}"])
+    writer.writerow([])
+
+    # Trends section
+    writer.writerow(['View Trends'])
+    writer.writerow(['Date', 'Views'])
+    for trend in trends:
+        writer.writerow([trend['date'], trend['views']])
+    writer.writerow([])
+
+    # Geography section
+    writer.writerow(['Geographic Data'])
+    writer.writerow(['Country', 'Views', 'Percentage'])
+    for geo in geography:
+        writer.writerow([geo['country'], geo['views'], f"{geo['percentage']:.1f}%"])
+    writer.writerow([])
+
+    # Traffic sources section
+    writer.writerow(['Traffic Sources'])
+    writer.writerow(['Source', 'Views', 'Percentage'])
+    for source in sources:
+        writer.writerow([source['source'], source['views'], f"{source['percentage']:.1f}%"])
+
+    return output.getvalue()
+
+def generate_analytics_json(listing_id: str, date_range: str) -> dict:
+    """Generate JSON export of analytics data"""
+    return {
+        'listing_id': listing_id,
+        'date_range': date_range,
+        'generated_at': datetime.now().isoformat(),
+        'overview': get_listing_analytics_summary(listing_id),
+        'trends': get_view_trends(listing_id, date_range, 'daily'),
+        'geography': get_geographic_data(listing_id, date_range),
+        'traffic_sources': get_traffic_sources(listing_id, date_range),
+        'conversion_funnel': get_conversion_funnel(listing_id, date_range)
+    }
+
+# ===========================================
+# CACHE MANAGEMENT & BACKGROUND JOBS
+# ===========================================
+
+@app.route('/api/admin/analytics/cache/cleanup', methods=['POST'])
+@require_admin
+def cleanup_expired_cache():
+    """Manually trigger cache cleanup (admin only)"""
+    try:
+        # Clean listing analytics cache
+        listing_cache_result = supabase.table('listing_analytics_cache')\
+            .delete()\
+            .lt('expires_at', datetime.now().isoformat())\
+            .execute()
+
+        # Clean seller analytics cache
+        seller_cache_result = supabase.table('seller_analytics_cache')\
+            .delete()\
+            .lt('expires_at', datetime.now().isoformat())\
+            .execute()
+
+        return jsonify({
+            'success': True,
+            'message': 'Cache cleanup completed',
+            'listing_cache_cleaned': len(listing_cache_result.data) if listing_cache_result.data else 0,
+            'seller_cache_cleaned': len(seller_cache_result.data) if seller_cache_result.data else 0
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error during cache cleanup: {e}")
+        return jsonify({"error": "Failed to cleanup cache"}), 500
+
+@app.route('/api/admin/analytics/cache/stats', methods=['GET'])
+@require_admin
+def get_cache_stats():
+    """Get cache statistics (admin only)"""
+    try:
+        # Listing cache stats
+        listing_total = supabase.table('listing_analytics_cache').select('id', count='exact').execute()
+        listing_expired = supabase.table('listing_analytics_cache').select('id', count='exact').lt('expires_at', datetime.now().isoformat()).execute()
+
+        # Seller cache stats
+        seller_total = supabase.table('seller_analytics_cache').select('id', count='exact').execute()
+        seller_expired = supabase.table('seller_analytics_cache').select('id', count='exact').lt('expires_at', datetime.now().isoformat()).execute()
+
+        return jsonify({
+            'listing_cache': {
+                'total_entries': listing_total.count or 0,
+                'expired_entries': listing_expired.count or 0,
+                'active_entries': (listing_total.count or 0) - (listing_expired.count or 0)
+            },
+            'seller_cache': {
+                'total_entries': seller_total.count or 0,
+                'expired_entries': seller_expired.count or 0,
+                'active_entries': (seller_total.count or 0) - (seller_expired.count or 0)
+            }
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error getting cache stats: {e}")
+        return jsonify({"error": "Failed to get cache stats"}), 500
+
+def invalidate_listing_cache_on_change(listing_id: str):
+    """Invalidate cache when listing data changes"""
+    try:
+        cache_key = f"summary:{listing_id}"
+        supabase.table('listing_analytics_cache')\
+            .delete()\
+            .eq('listing_id', listing_id)\
+            .eq('cache_key', cache_key)\
+            .execute()
+
+        app.logger.info(f"Invalidated cache for listing {listing_id}")
+    except Exception as e:
+        app.logger.error(f"Error invalidating cache for listing {listing_id}: {e}")
+
+def invalidate_seller_cache_on_change(seller_id: str):
+    """Invalidate cache when seller data changes"""
+    try:
+        supabase.table('seller_analytics_cache')\
+            .delete()\
+            .eq('seller_id', seller_id)\
+            .execute()
+
+        app.logger.info(f"Invalidated cache for seller {seller_id}")
+    except Exception as e:
+        app.logger.error(f"Error invalidating cache for seller {seller_id}: {e}")
+
+# ===========================================
+# SECURITY & RATE LIMITING
+# ===========================================
+
+# ===========================================
+# DATA PRIVACY & GDPR COMPLIANCE
+# ===========================================
+
+def anonymize_old_analytics_data():
+    """Anonymize old analytics data for privacy compliance"""
+    try:
+        # Anonymize IP addresses older than 30 days
+        thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+
+        # Update old view records to remove IP addresses
+        supabase.table('listing_views')\
+            .update({'ip_address': None})\
+            .lt('viewed_at', thirty_days_ago)\
+            .neq('ip_address', None)\
+            .execute()
+
+        # Remove old detailed user agent data
+        supabase.table('listing_views')\
+            .update({'user_agent': 'anonymized'})\
+            .lt('viewed_at', thirty_days_ago)\
+            .neq('user_agent', 'anonymized')\
+            .execute()
+
+        app.logger.info("Anonymized old analytics data for privacy compliance")
+        return True
+
+    except Exception as e:
+        app.logger.error(f"Error anonymizing old analytics data: {e}")
+        return False
+
+@app.route('/api/user/analytics/delete', methods=['POST'])
+@require_auth
+def delete_user_analytics_data():
+    """Allow users to delete their analytics data (GDPR compliance)"""
+    user_id = request.user_id
+
+    try:
+        # Delete view records for this user
+        views_deleted = supabase.table('listing_views')\
+            .delete()\
+            .eq('viewer_id', user_id)\
+            .execute()
+
+        # Delete analytics events for this user
+        events_deleted = supabase.table('analytics_events')\
+            .delete()\
+            .eq('user_id', user_id)\
+            .execute()
+
+        # Invalidate any cached data that might include this user
+        supabase.table('listing_analytics_cache').delete().execute()
+        supabase.table('seller_analytics_cache').delete().execute()
+
+        return jsonify({
+            'success': True,
+            'message': 'Your analytics data has been deleted',
+            'views_deleted': len(views_deleted.data) if views_deleted.data else 0,
+            'events_deleted': len(events_deleted.data) if events_deleted.data else 0
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error deleting user analytics data: {e}")
+        return jsonify({"error": "Failed to delete analytics data"}), 500
+
+# ========================================
+# CRYPTO-TO-CRYPTO EXCHANGE ENDPOINTS
+# ========================================
+
+# ============================================
+# SWAPKIT UTILITY FUNCTIONS
+# ============================================
+
+def swapkit_request(method, endpoint, params=None, data=None, retry_count=0):
+    """
+    Make request to SwapKit API with retry logic
+    
+    Args:
+        method: HTTP method (GET, POST)
+        endpoint: API endpoint (e.g., '/quote')
+        params: Query parameters (for GET)
+        data: JSON body (for POST)
+        retry_count: Current retry attempt
+    
+    Returns:
+        JSON response from SwapKit
+    """
+    url = f"{SWAPKIT_API_URL}{endpoint}"
+    
+    headers = {
+        'x-api-key': SWAPKIT_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+    
+    try:
+        if method == 'GET':
+            response = requests.get(url, headers=headers, params=params, timeout=SWAPKIT_TIMEOUT)
+        elif method == 'POST':
+            response = requests.post(url, headers=headers, json=data, timeout=SWAPKIT_TIMEOUT)
+        else:
+            raise SwapKitError(f"Unsupported method: {method}")
+        
+        # Handle rate limiting with exponential backoff
+        if response.status_code == 429 and retry_count < SWAPKIT_MAX_RETRIES:
+            wait_time = SWAPKIT_RETRY_DELAY * (2 ** retry_count)
+            app.logger.warning(f"SwapKit rate limited, retrying in {wait_time}s...")
+            time.sleep(wait_time)
+            return swapkit_request(method, endpoint, params, data, retry_count + 1)
+        
+        response.raise_for_status()
+        return response.json()
+        
+    except requests.exceptions.Timeout:
+        if retry_count < SWAPKIT_MAX_RETRIES:
+            app.logger.warning(f"SwapKit timeout, retrying...")
+            time.sleep(SWAPKIT_RETRY_DELAY)
+            return swapkit_request(method, endpoint, params, data, retry_count + 1)
+        raise SwapKitAPIError("Request timeout", status_code=408)
+        
+    except requests.exceptions.HTTPError as e:
+        error_data = {}
+        try:
+            error_data = response.json()
+        except:
+            pass
+        raise SwapKitAPIError(str(e), status_code=response.status_code, response=error_data)
+        
+    except Exception as e:
+        raise SwapKitAPIError(f"Request failed: {str(e)}")
+
+def verify_swapkit_webhook_signature(payload, signature):
+    """
+    Verify SwapKit webhook signature using HMAC-SHA256
+    
+    Args:
+        payload: Raw request body (bytes)
+        signature: Signature from X-SwapKit-Signature header
+    
+    Returns:
+        True if valid, False otherwise
+    """
+    try:
+        expected = hmac.new(
+            SWAPKIT_WEBHOOK_SECRET.encode(),
+            payload,
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
+    except Exception as e:
+        app.logger.error(f"Signature verification failed: {e}")
+        return False
+
+def map_currency_to_swapkit(currency):
+    """
+    Map Medius currency code to SwapKit asset format
+    
+    Args:
+        currency: Medius currency code (e.g., 'BTC', 'USDT-ERC20')
+    
+    Returns:
+        SwapKit asset identifier (e.g., 'BTC.BTC', 'ETH.USDT-0x...')
+    
+    Raises:
+        ValueError: If currency not supported
+    """
+    currency = currency.upper().strip()
+    
+    if currency in SWAPKIT_CURRENCY_MAPPING:
+        return SWAPKIT_CURRENCY_MAPPING[currency]
+    
+    raise ValueError(f"Unsupported currency: {currency}")
+
+def map_swapkit_to_currency(swapkit_asset):
+    """
+    Map SwapKit asset identifier back to Medius currency code
+    
+    Args:
+        swapkit_asset: SwapKit asset (e.g., 'BTC.BTC')
+    
+    Returns:
+        Medius currency code (e.g., 'BTC')
+    """
+    for currency, asset in SWAPKIT_CURRENCY_MAPPING.items():
+        if asset == swapkit_asset:
+            return currency
+    return swapkit_asset
+
+def get_platform_fee_address(currency):
+    """
+    Get platform fee collection address for currency
+    
+    Args:
+        currency: Currency code
+    
+    Returns:
+        Platform wallet address
+    
+    Raises:
+        ValueError: If no address configured
+    """
+    currency = currency.upper().strip()
+    address = FEE_ADDRESSES.get(currency)
+    
+    if not address:
+        raise ValueError(f"No fee address configured for {currency}")
+    
+    return address
+
+def map_swapkit_status(swapkit_status):
+    """
+    Map SwapKit order status to Medius exchange status
+    
+    Args:
+        swapkit_status: SwapKit status string
+    
+    Returns:
+        Medius exchange status
+    """
+    status_map = {
+        'pending': 'pending',
+        'waiting': 'pending',
+        'processing': 'swapping',
+        'confirming': 'confirming',
+        'completed': 'swap_complete',  # Platform received funds, needs to payout user
+        'complete': 'swap_complete',
+        'failed': 'failed',
+        'expired': 'expired',
+        'refunded': 'refunded',
+    }
+    return status_map.get(swapkit_status.lower(), 'pending')
+
+def calculate_platform_fee(amount):
+    """
+    Calculate platform fee amount
+    
+    Args:
+        amount: Total amount
+    
+    Returns:
+        Platform fee (Decimal)
+    """
+    return Decimal(str(amount)) * C2C_FEE
+
+def calculate_user_payout_amount(total_received, platform_fee_percent):
+    """
+    Calculate amount to send to user after platform fee
+    
+    Args:
+        total_received: Total amount received from SwapKit
+        platform_fee_percent: Platform fee percentage (as Decimal, e.g., 0.01 for 1%)
+    
+    Returns:
+        Amount to send to user
+    """
+    platform_fee = Decimal(str(total_received)) * Decimal(str(platform_fee_percent))
+    user_amount = Decimal(str(total_received)) - platform_fee
+    return max(Decimal('0'), user_amount)
+
+def estimate_network_fee(currency):
+    """
+    Estimate network fee for sending payout to user
+    
+    Args:
+        currency: Currency code
+    
+    Returns:
+        Estimated network fee (Decimal)
+    """
+    # Simplified estimates - in production, query from blockchain APIs
+    fee_estimates = {
+        'BTC': Decimal('0.00001'),
+        'ETH': Decimal('0.001'),
+        'SOL': Decimal('0.000005'),
+        'LTC': Decimal('0.0001'),
+        'BCH': Decimal('0.00001'),
+        'DOGE': Decimal('1.0'),
+        'MATIC': Decimal('0.01'),
+        'AVAX': Decimal('0.001'),
+        'BNB': Decimal('0.0001'),
+        'USDT-ERC20': Decimal('0.001'),
+        'USDT-BEP20': Decimal('0.0001'),
+        'USDT-SOL': Decimal('0.000005'),
+        'USDT-TRON': Decimal('1.0'),
+    }
+    return fee_estimates.get(currency.upper(), Decimal('0'))
+
+def validate_exchange_amount(amount, currency):
+    """
+    Validate if exchange amount meets minimum requirements
+    
+    Args:
+        amount: Exchange amount
+        currency: Currency code
+    
+    Returns:
+        True if valid, False otherwise
+    """
+    if Decimal(str(amount)) <= 0:
+        return False
+    
+    # Minimum amounts per currency
+    minimums = {
+        'BTC': Decimal('0.0001'),
+        'ETH': Decimal('0.001'),
+        'SOL': Decimal('0.01'),
+        'USDT-ERC20': Decimal('5'),
+        'USDT-BEP20': Decimal('5'),
+        'USDT-TRON': Decimal('5'),
+        'USDT-SOL': Decimal('5'),
+    }
+    
+    min_amount = minimums.get(currency.upper(), Decimal('0'))
+    return Decimal(str(amount)) >= min_amount
+
+# ============================================
+# EXCHANGE ENDPOINTS
+# ============================================
+
+@app.route('/api/exchange/currencies', methods=['GET'])
+def get_exchange_currencies():
+    """
+    Get list of supported currencies for exchange
+    
+    Returns only the 13 currencies supported by SwapKit
+    """
+    try:
+        currencies = []
+        
+        # Only return currencies in SWAPKIT_CURRENCY_MAPPING
+        for currency, swapkit_code in SWAPKIT_CURRENCY_MAPPING.items():
+            fee_address = FEE_ADDRESSES.get(currency)
+            
+            currencies.append({
+                'code': currency,
+                'swapkit_code': swapkit_code,
+                'name': currency.split('-')[0],
+                'network': currency.split('-')[1] if '-' in currency else 'mainnet',
+                'supported': fee_address is not None,
+                'fee_address_configured': fee_address is not None
+            })
+        
+        return jsonify({
+            'currencies': currencies,
+            'total': len(currencies),
+            'note': 'ADA and DOT are not supported for exchange'
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Get currencies error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch currencies'}), 500
+
+@app.route('/api/exchange/quote', methods=['POST'])
+@require_auth
+def get_exchange_quote():
+    try:
+        data = request.json or {}
+        from_currency = (data.get('from_currency') or '').upper().strip()
+        to_currency   = (data.get('to_currency') or '').upper().strip()
+        amount_str    = data.get('amount')
+        slippage      = data.get('slippage', float(DEFAULT_SLIPPAGE))
+
+        if not from_currency or not to_currency:
+            return jsonify({'error': 'from_currency and to_currency required'}), 400
+        if from_currency == to_currency:
+            return jsonify({'error': 'Cannot exchange the same currency'}), 400
+
+        try:
+            amount = Decimal(str(amount_str))
+        except (ValueError, TypeError, InvalidOperation):
+            return jsonify({'error': 'Invalid amount'}), 400
+        if amount <= 0:
+            return jsonify({'error': 'Amount must be positive'}), 400
+        if not validate_exchange_amount(amount, from_currency):
+            return jsonify({'error': f'Amount below minimum threshold for {from_currency}'}), 400
+
+        try:
+            sell_asset  = map_currency_to_swapkit(from_currency)
+            buy_asset   = map_currency_to_swapkit(to_currency)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        # SwapKit API expects decimal amounts (e.g., "0.1"), NOT base units
+        # When includeTx=false, sourceAddress and destinationAddress are NOT needed
+        payload = {
+            'sellAsset': str(sell_asset),
+            'buyAsset':  str(buy_asset),
+            'sellAmount': str(amount),  # Send as decimal string
+            'slippage': slippage,
+            'includeTx': False
+        }
+
+        try:
+            quote = swapkit_request('POST', '/quote', data=payload)
+        except SwapKitAPIError as e:
+            details = getattr(e, 'response', None)
+            app.logger.error(f"/quote error: {e} | details={details} | payload={payload}")
+            return jsonify({'error': 'Failed to get quote', 'details': details}), 500
+
+        routes = quote.get('routes', [])
+        warnings = quote.get('warnings', [])
+        provider_errors = quote.get('providerErrors', [])
+        
+        if not routes:
+            msg = 'No routes available'
+            if provider_errors:
+                msg += f" | providerErrors={provider_errors}"
+            return jsonify({'error': msg, 'provider_errors': provider_errors}), 400
+
+        best = routes[0]
+        
+        # API returns decimal amounts as strings (e.g., "0.1" not "10000000")
+        raw_sell = best.get('sellAmount') or best.get('estimatedSellAmount')
+        raw_buy  = best.get('expectedBuyAmount') or best.get('estimatedBuyAmount') or best.get('buyAmount') or '0'
+
+        # Convert API response strings to Decimal for calculations
+        from_amount = Decimal(str(raw_sell)) if raw_sell else amount
+        to_amount_gross = Decimal(str(raw_buy))
+
+        if to_amount_gross <= 0:
+            return jsonify({'error': 'Invalid exchange rate from provider'}), 500
+
+        platform_fee_amount  = calculate_platform_fee(to_amount_gross)
+        network_fee_estimate = estimate_network_fee(to_currency)
+        to_amount_after_fee  = max(Decimal('0'), to_amount_gross - platform_fee_amount - network_fee_estimate)
+        rate = (to_amount_gross / from_amount) if from_amount > 0 else Decimal('0')
+        provider = best.get('path') or ((best.get('providers') or [None])[0]) or 'unknown'
+
+        return jsonify({
+            'quote_id': quote.get('quoteId'),
+            'from_currency': from_currency,
+            'to_currency':   to_currency,
+            'from_amount': float(from_amount),
+            'to_amount': float(to_amount_gross),
+            'to_amount_after_fee': float(to_amount_after_fee),
+            'rate': float(rate),
+            'platform_fee_percent': float(C2C_FEE * 100),
+            'platform_fee_amount':  float(platform_fee_amount),
+            'network_fee_estimate': float(network_fee_estimate),
+            'slippage': float(slippage),
+            'provider': provider,
+            'warnings': warnings,
+            'valid_for_seconds': C2C_RATE_LOCK_SECONDS,
+            'routes_available': len(routes),
+        }), 200
+
+    except Exception as e:
+        app.logger.error(f"get_exchange_quote error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to generate quote'}), 500
+        
+@app.route('/api/exchange/create', methods=['POST'])
+@require_auth
+def create_exchange():
+    try:
+        data = request.json or {}
+        user_id = request.user_id
+
+        from_currency       = (data.get('from_currency') or '').upper().strip()
+        to_currency         = (data.get('to_currency') or '').upper().strip()
+        amount_str          = data.get('amount')
+        destination_address = (data.get('destination_address') or '').strip()
+        destination_tag     = (data.get('destination_tag') or '').strip()
+        slippage            = data.get('slippage', float(DEFAULT_SLIPPAGE))
+
+        if not all([from_currency, to_currency, amount_str, destination_address]):
+            return jsonify({'error': 'Missing required fields'}), 400
+        if from_currency == to_currency:
+            return jsonify({'error': 'Cannot exchange the same currency'}), 400
+
+        try:
+            amount = Decimal(str(amount_str))
+        except (ValueError, TypeError, InvalidOperation):
+            return jsonify({'error': 'Invalid amount format'}), 400
+        if amount <= 0:
+            return jsonify({'error': 'Amount must be positive'}), 400
+        if not validate_exchange_amount(amount, from_currency):
+            return jsonify({'error': f'Amount below minimum threshold for {from_currency}'}), 400
+
+        try:
+            sell_asset  = map_currency_to_swapkit(from_currency)
+            buy_asset   = map_currency_to_swapkit(to_currency)
+            src_address = get_platform_fee_address(from_currency)
+            dst_address = get_platform_fee_address(to_currency)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        sell_amount_base = to_base_units(from_currency, amount)
+
+        payload = {
+            'sellAsset': str(sell_asset),
+            'buyAsset':  str(buy_asset),
+            'sellAmount': sell_amount_base,      # base units
+            'sourceAddress':      src_address,
+            'destinationAddress': dst_address,
+            'slippage': slippage,
+            'includeTx': True
+        }
+
+        try:
+            quote = swapkit_request('POST', '/quote', data=payload)
+        except SwapKitAPIError as e:
+            details = getattr(e, 'response', None)
+            app.logger.error(f"/quote 400: {e} | details={details} | payload={payload}")
+            return jsonify({'error': 'Failed to get route from provider', 'details': details}), 500
+
+        routes = quote.get('routes', [])
+        warnings = quote.get('warnings', [])
+        provider_errors = quote.get('providerErrors', [])
+        if not routes:
+            msg = 'No routes available'
+            if provider_errors:
+                msg += f" | providerErrors={provider_errors}"
+            return jsonify({'error': msg, 'provider_errors': provider_errors}), 400
+
+        best = routes[0]
+
+        deposit_address = (
+            best.get('targetAddress') or
+            best.get('inboundAddress') or
+            (best.get('calldata') or {}).get('toAddress') or
+            best.get('memo')
+        )
+        if not deposit_address:
+            app.logger.error(f"No deposit address in best route: {best}")
+            return jsonify({'error': 'Failed to get deposit address from provider'}), 500
+
+        raw_sell = best.get('sellAmount') or best.get('estimatedSellAmount') or sell_amount_base
+        raw_buy  = best.get('expectedBuyAmount') or best.get('estimatedBuyAmount') or best.get('buyAmount') or '0'
+
+        def from_base_units(currency: str, base_str: str) -> Decimal:
+            dec = ASSET_DECIMALS[currency]
+            return (Decimal(base_str) / (Decimal(10) ** dec)).quantize(Decimal('0.00000001'))
+
+        from_amount    = from_base_units(from_currency, str(raw_sell))
+        to_amount_gross = from_base_units(to_currency, str(raw_buy))
+        if to_amount_gross <= 0:
+            return jsonify({'error': 'Invalid exchange rate from provider'}), 500
+
+        platform_fee_amount  = calculate_platform_fee(to_amount_gross)
+        network_fee_estimate = estimate_network_fee(to_currency)
+        exchange_rate        = (to_amount_gross / from_amount) if from_amount > 0 else Decimal('0')
+
+        now = datetime.utcnow()
+        rate_expires_at = now + timedelta(seconds=C2C_RATE_LOCK_SECONDS)
+
+        # Persist using your existing columns
+        exchange_row = {
+            'user_id': str(user_id),
+            'from_currency': from_currency,
+            'from_amount': float(from_amount),
+            'to_currency': to_currency,
+            'to_amount': float(to_amount_gross),
+            'exchange_rate': float(exchange_rate),
+            'rate_source': 'swapkit',
+            'rate_locked_at': now.isoformat(),
+            'rate_expires_at': rate_expires_at.isoformat(),
+            'platform_fee_percent': float(C2C_FEE * 100),
+            'platform_fee_amount': float(platform_fee_amount),
+            'network_fee_amount': float(network_fee_estimate),
+            'deposit_address': deposit_address,
+            'destination_address': destination_address,
+            'platform_fee_address': dst_address,
+            'status': 'pending',
+            'user_ip': request.remote_addr,
+            'user_agent': request.headers.get('User-Agent'),
+            'updated_at': now.isoformat(),
+            'metadata': {
+                'destination_tag': destination_tag or None,
+                'swapkit_quote_id': quote.get('quoteId'),
+                'warnings': warnings,
+                'provider_errors': provider_errors,
+                'route_details': best
+            }
+        }
+
+        try:
+            ins = supabase.table('crypto_exchanges').insert(exchange_row).execute()
+            if not ins.data:
+                raise Exception("Insert returned no data")
+            exchange_id = ins.data[0]['id']
+        except Exception as e:
+            app.logger.error(f"DB insert failed: {e}")
+            return jsonify({'error': 'Failed to create exchange record'}), 500
+
+        provider = best.get('path') or ((best.get('providers') or [None])[0]) or 'unknown'
+
+        return jsonify({
+            'id': exchange_id,
+            'status': 'pending',
+            'deposit': {
+                'address': deposit_address,
+                'currency': from_currency,
+                'amount': float(from_amount),
+                'tag': destination_tag or None,
+                'instructions': f'Send exactly {from_amount} {from_currency} to the address above'
+            },
+            'expected_output': {
+                'currency': to_currency,
+                'gross_amount': float(to_amount_gross),
+                'platform_fee': float(platform_fee_amount),
+                'network_fee_estimate': float(network_fee_estimate),
+                'destination_address': destination_address
+            },
+            'rate': float(exchange_rate),
+            'rate_locked_at': now.isoformat(),
+            'rate_expires_at': rate_expires_at.isoformat(),
+            'provider': provider,
+            'warnings': warnings
+        }), 201
+
+    except Exception as e:
+        app.logger.error(f"create_exchange error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Unexpected error creating exchange'}), 500
+
+@app.route('/api/exchange/<exchange_id>', methods=['GET'])
+@require_auth
+def get_exchange_status(exchange_id):
+    """
+    Get exchange status - UPDATED to match frontend format
+    """
+    try:
+        user_id = request.user_id
+        
+        # Fetch exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        
+        # Verify ownership
+        if exchange['user_id'] != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # Calculate rate expiry
+        rate_locked_at = exchange.get('rate_locked_at')
+        rate_expires_at = exchange.get('rate_expires_at')
+        expires_in_seconds = 0
+        expired = True
+        
+        if rate_expires_at:
+            expires_at_dt = datetime.fromisoformat(rate_expires_at.replace('Z', '+00:00'))
+            now = datetime.utcnow()
+            expires_in_seconds = max(0, int((expires_at_dt - now).total_seconds()))
+            expired = expires_in_seconds <= 0
+        
+        # Format response to match frontend expectations
+        response = {
+            'exchange_id': exchange['id'],
+            'status': exchange['status'],
+            'created_at': exchange['created_at'],
+            'updated_at': exchange['updated_at'],
+            'completed_at': exchange.get('completed_at'),
+            
+            # From/To structure
+            'from': {
+                'currency': exchange['from_currency'],
+                'amount': float(exchange['from_amount']),
+                'amount_usd': float(exchange.get('from_amount_usd') or 0)
+            },
+            'to': {
+                'currency': exchange['to_currency'],
+                'amount': float(exchange.get('user_payout_amount') or exchange['to_amount']),  # User receives this
+                'amount_usd': float(exchange.get('to_amount_usd') or 0)
+            },
+            
+            # Deposit info
+            'deposit': {
+                'address': exchange['deposit_address'],
+                'tag': exchange.get('deposit_tag'),  # For XRP, XLM, etc.
+                'tx_hash': exchange.get('deposit_tx_hash'),
+                'confirmations': exchange.get('deposit_confirmations', 0),
+                'detected_at': exchange.get('deposit_detected_at'),
+                'confirmed_at': exchange.get('deposit_confirmed_at')
+            },
+            
+            # Payout info
+            'payout': {
+                'address': exchange['destination_address'],
+                'tag': exchange.get('destination_tag'),
+                'tx_hash': exchange.get('user_payout_tx_hash'),
+                'confirmations': exchange.get('payout_confirmations', 0),
+                'sent_at': exchange.get('user_payout_sent_at'),
+                'confirmed_at': exchange.get('payout_confirmed_at')
+            },
+            
+            # Fees
+            'fees': {
+                'platform_percent': float(exchange.get('platform_fee_percent', 0)),
+                'platform_amount': float(exchange.get('platform_fee_amount', 0)),
+                'platform_usd': float(exchange.get('platform_fee_usd') or 0),
+                'network_amount': float(exchange.get('network_fee_amount', 0)),
+                'network_usd': float(exchange.get('network_fee_usd') or 0)
+            },
+            
+            # Rate info
+            'rate': {
+                'value': float(exchange.get('exchange_rate', 0)),
+                'locked_at': rate_locked_at or exchange['created_at'],
+                'expires_at': rate_expires_at or exchange['created_at'],
+                'expires_in_seconds': expires_in_seconds,
+                'expired': expired
+            },
+            
+            # SwapKit info
+            'swapkit_order_id': exchange.get('swapkit_order_id'),
+            
+            # Error if any
+            'error': exchange.get('error_message')
+        }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        app.logger.error(f"Get exchange status error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch exchange status'}), 500
+
+@app.route('/api/exchange/user/history', methods=['GET'])
+@require_auth
+def get_user_exchange_history():
+    """
+    Get user exchange history - UPDATED to match frontend format
+    """
+    try:
+        user_id = request.user_id
+        
+        # Pagination
+        page = int(request.args.get('page', 1))
+        per_page = min(int(request.args.get('limit', 20)), 100)  # Frontend uses 'limit' not 'per_page'
+        offset = (page - 1) * per_page
+        
+        # Filters
+        status = request.args.get('status')
+        
+        # Build query
+        query = supabase.table('crypto_exchanges')\
+            .select('*', count='exact')\
+            .eq('user_id', str(user_id))\
+            .order('created_at', desc=True)\
+            .range(offset, offset + per_page - 1)
+        
+        if status:
+            query = query.eq('status', status)
+        
+        result = query.execute()
+        
+        exchanges = result.data or []
+        total = result.count or 0
+        pages = (total + per_page - 1) // per_page
+        
+        # Format exchanges to match frontend expectations
+        formatted_exchanges = []
+        for ex in exchanges:
+            formatted_exchanges.append({
+                'exchange_id': ex['id'],
+                'status': ex['status'],
+                'from_currency': ex['from_currency'],
+                'from_amount': float(ex['from_amount']),
+                'to_currency': ex['to_currency'],
+                'to_amount': float(ex.get('user_payout_amount') or ex['to_amount']),
+                'rate': float(ex.get('exchange_rate', 0)),
+                'created_at': ex['created_at'],
+                'completed_at': ex.get('completed_at')
+            })
+        
+        return jsonify({
+            'exchanges': formatted_exchanges,
+            'pagination': {
+                'page': page,
+                'limit': per_page,
+                'total': total,
+                'pages': pages
+            }
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Get user history error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to fetch exchange history'}), 500
+
+@app.route('/api/exchange/<exchange_id>/refresh', methods=['POST'])
+@require_auth
+def refresh_exchange_status(exchange_id):
+    """
+    Manually refresh exchange status from SwapKit
+    
+    This forces a status check instead of waiting for background monitor
+    """
+    try:
+        user_id = request.user_id
+        
+        # Get exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        
+        # Verify ownership
+        if exchange['user_id'] != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # If exchange has deposit TX, try to track it
+        if exchange.get('deposit_tx_hash'):
+            try:
+                from_currency = exchange['from_currency']
+                tx_hash = exchange['deposit_tx_hash']
+                
+                # Track with SwapKit
+                track_response = swapkit_track_transaction(tx_hash, from_currency)
+                
+                if track_response:
+                    # Parse and update status
+                    new_status = parse_track_status(track_response)
+                    
+                    if new_status and new_status != exchange['status']:
+                        updates = {
+                            'status': new_status,
+                            'swapkit_response': track_response,
+                            'updated_at': datetime.utcnow().isoformat()
+                        }
+                        
+                        # If swap complete, mark for payout
+                        if new_status == 'swap_complete':
+                            updates['user_payout_pending'] = True
+                        
+                        supabase.table('crypto_exchanges')\
+                            .update(updates)\
+                            .eq('id', exchange_id)\
+                            .execute()
+                        
+                        app.logger.info(f"Exchange {exchange_id} status refreshed: {exchange['status']} → {new_status}")
+                
+            except Exception as e:
+                app.logger.error(f"Failed to refresh status: {e}")
+                # Don't fail the request, just log it
+        
+        return jsonify({'status': 'ok', 'message': 'Status refresh requested'}), 200
+        
+    except Exception as e:
+        app.logger.error(f"Refresh status error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to refresh status'}), 500
+
+
+def get_platform_wallet_private_key(currency):
+    """
+    Get private key for platform wallet address
+    
+    Uses environment variables:
+    - BTC_FEE_ADDY_PRIVATE_KEY
+    - ETH_FEE_ADDY_PRIVATE_KEY
+    - etc.
+    
+    For tokens on same chain (like USDT-ERC20), uses the chain's key (ETH)
+    """
+    currency = currency.upper().strip()
+    
+    # Map currency to private key environment variable
+    key_map = {
+        'BTC': 'BTC_FEE_ADDY_PRIVATE_KEY',
+        'ETH': 'ETH_FEE_ADDY_PRIVATE_KEY',
+        'SOL': 'SOL_FEE_ADDY_PRIVATE_KEY',
+        'LTC': 'LTC_FEE_ADDY_PRIVATE_KEY',
+        'BCH': 'BCH_FEE_ADDY_PRIVATE_KEY',
+        'DOGE': 'DOGE_FEE_ADDY_PRIVATE_KEY',
+        'XRP': 'XRP_FEE_ADDY_PRIVATE_KEY',
+        'ADA': 'ADA_FEE_ADDY_PRIVATE_KEY',
+        'DOT': 'DOT_FEE_ADDY_PRIVATE_KEY',
+        'MATIC': 'MATIC_FEE_ADDY_PRIVATE_KEY',
+        'AVAX': 'AVAX_FEE_ADDY_PRIVATE_KEY',
+        'TRX': 'TRX_FEE_ADDY_PRIVATE_KEY',
+        'BNB': 'BNB_FEE_ADDY_PRIVATE_KEY',
+        'ATOM': 'ATOM_FEE_ADDY_PRIVATE_KEY',
+        'XLM': 'XLM_FEE_ADDY_PRIVATE_KEY',
+        
+        # Tokens use their chain's private key
+        'USDT-ERC20': 'ETH_FEE_ADDY_PRIVATE_KEY',
+        'USDC-ERC20': 'ETH_FEE_ADDY_PRIVATE_KEY',
+        'USDT-BEP20': 'BNB_FEE_ADDY_PRIVATE_KEY',
+        'USDT-SOL': 'SOL_FEE_ADDY_PRIVATE_KEY',
+        'USDT-TRON': 'TRX_FEE_ADDY_PRIVATE_KEY',
+    }
+    
+    env_key = key_map.get(currency)
+    if not env_key:
+        raise ValueError(f"No private key mapping for currency: {currency}")
+    
+    private_key = os.getenv(env_key)
+    if not private_key:
+        raise ValueError(f"Private key not configured in environment: {env_key}")
+    
+    return private_key
+
+@app.route('/api/exchange/<exchange_id>/cancel', methods=['POST'])
+@require_auth
+def cancel_exchange(exchange_id):
+    """
+    Request refund/cancellation of exchange
+    
+    Request body:
+    {
+        "refund_address": "user's refund address",
+        "refund_tag": "optional tag/memo"
+    }
+    
+    IMPORTANT: 
+    - If user deposited to SwapKit's address (which we don't control), 
+      we cannot refund directly
+    - This endpoint marks the exchange for manual review
+    - Admin must process refund manually or contact SwapKit support
+    """
+    try:
+        user_id = request.user_id
+        data = request.json or {}
+        
+        refund_address = data.get('refund_address', '').strip()
+        refund_tag = data.get('refund_tag', '').strip()
+        
+        # ============================================
+        # VALIDATION
+        # ============================================
+        
+        if not refund_address:
+            return jsonify({'error': 'Refund address is required'}), 400
+        
+        # Get exchange
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('id', exchange_id)\
+            .single()\
+            .execute()
+        
+        if not result.data:
+            return jsonify({'error': 'Exchange not found'}), 404
+        
+        exchange = result.data
+        
+        # Verify ownership
+        if exchange['user_id'] != str(user_id):
+            return jsonify({'error': 'Unauthorized'}), 403
+        
+        # Check if refundable
+        refundable_statuses = ['failed', 'expired', 'rate_expired', 'pending']
+        if exchange['status'] not in refundable_statuses:
+            return jsonify({
+                'error': f'Cannot request refund for exchange with status: {exchange["status"]}'
+            }), 400
+        
+        # Check if already refunded
+        if exchange['status'] == 'refunded':
+            return jsonify({'error': 'Exchange already refunded'}), 400
+        
+        # ============================================
+        # UPDATE EXCHANGE WITH REFUND REQUEST
+        # ============================================
+        
+        update_data = {
+            'status': 'refund_requested',
+            'updated_at': datetime.utcnow().isoformat(),
+            'metadata': {
+                **exchange.get('metadata', {}),
+                'refund_requested_at': datetime.utcnow().isoformat(),
+                'refund_address': refund_address,
+                'refund_tag': refund_tag or None,
+                'refund_requested_by': str(user_id)
+            }
+        }
+        
+        supabase.table('crypto_exchanges').update(update_data).eq('id', exchange_id).execute()
+        
+        app.logger.info(f"Refund requested for exchange {exchange_id} by user {user_id}")
+        
+        # ============================================
+        # NOTIFY ADMIN (Optional - implement as needed)
+        # ============================================
+        
+        try:
+            # Send notification to admin
+            supabase.table('admin_notifications').insert({
+                'admin_id': None,  # Broadcast to all admins
+                'type': 'user_report',
+                'title': 'Refund Request',
+                'message': f'User requested refund for exchange {exchange_id}. Amount: {exchange["from_amount"]} {exchange["from_currency"]}',
+                'priority': 'normal',
+                'metadata': {
+                    'exchange_id': exchange_id,
+                    'user_id': str(user_id),
+                    'refund_address': refund_address,
+                    'from_currency': exchange['from_currency'],
+                    'from_amount': exchange['from_amount']
+                }
+            }).execute()
+        except Exception as notif_error:
+            app.logger.error(f"Failed to create admin notification: {notif_error}")
+            # Don't fail the request if notification fails
+        
+        # ============================================
+        # RETURN RESPONSE
+        # ============================================
+        
+        return jsonify({
+            'status': 'ok',
+            'message': 'Refund request submitted successfully. Our team will review and process it.',
+            'exchange_id': exchange_id,
+            'refund_address': refund_address,
+            'note': 'Refunds are typically processed within 24-48 hours'
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Cancel exchange error: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Failed to request refund. Please try again.'}), 500
+
+
+# ============================================
+# SWAPKIT TRACK (POLLING)
+# ============================================
+
+def swapkit_track_transaction(tx_hash, chain_id):
+    """
+    Track transaction status using SwapKit /track endpoint
+    
+    Args:
+        tx_hash: Transaction hash to track
+        chain_id: Chain identifier (e.g., 'BTC', 'ETH')
+    
+    Returns:
+        Status response from SwapKit
+    """
+    try:
+        response = swapkit_request('POST', '/track', data={
+            'hash': tx_hash,
+            'chainId': chain_id
+        })
+        
+        return response
+        
+    except Exception as e:
+        app.logger.error(f"SwapKit track error: {e}")
+        return None
+
+def parse_track_status(track_response):
+    """
+    Parse SwapKit track response into our status
+    
+    SwapKit track statuses:
+    - not_started
+    - pending
+    - swapping
+    - completed
+    - refunded
+    - failed
+    """
+    if not track_response:
+        return None
+    
+    status = track_response.get('status', '').lower()
+    
+    status_map = {
+        'not_started': 'pending',
+        'pending': 'confirming',
+        'swapping': 'swapping',
+        'completed': 'swap_complete',
+        'refunded': 'refunded',
+        'failed': 'failed'
+    }
+    
+    return status_map.get(status, 'pending')
+
+
+# ============================================
+# BACKGROUND MONITORING (POLLING-BASED)
+# ============================================
+
+def monitor_deposit_wallets():
+    """
+    Monitor temporary wallets for incoming deposits
+    
+    Flow:
+    1. Find pending exchanges
+    2. Check wallet balance
+    3. If deposit detected, update status
+    """
+    try:
+        app.logger.info("Checking deposit wallets...")
+        
+        # Get pending exchanges waiting for deposit
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('status', 'pending')\
+            .is_('deposit_tx_hash', 'null')\
+            .execute()
+        
+        exchanges = result.data or []
+        
+        for exchange in exchanges:
+            try:
+                exchange_id = exchange['id']
+                deposit_address = exchange['deposit_address']
+                from_currency = exchange['from_currency']
+                expected_amount = Decimal(exchange['from_amount'])
+                
+                # Skip placeholder addresses
+                if not deposit_address or deposit_address.startswith('TEMP_WALLET_'):
+                    continue
+                
+                # Check wallet balance
+                balance = get_wallet_balance(deposit_address, from_currency)
+                
+                if balance >= expected_amount:
+                    app.logger.info(f"Exchange {exchange_id}: Deposit detected! {balance} {from_currency}")
+                    
+                    # Update status
+                    supabase.table('crypto_exchanges').update({
+                        'status': 'deposit_detected',
+                        'deposit_detected_at': datetime.utcnow().isoformat(),
+                        'deposit_confirmations': 1,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('id', exchange_id).execute()
+                
+            except Exception as e:
+                app.logger.error(f"Error checking deposit for {exchange.get('id')}: {e}")
+                continue
+        
+    except Exception as e:
+        app.logger.error(f"Deposit monitoring error: {e}\n{traceback.format_exc()}")
+
+def process_swapkit_forwards():
+    """
+    Forward detected deposits to SwapKit
+    
+    Flow:
+    1. Find deposits ready to forward
+    2. Send to SwapKit deposit address
+    3. Store transaction hash for tracking
+    """
+    try:
+        app.logger.info("Processing SwapKit forwards...")
+        
+        # Get exchanges with deposits detected, not yet forwarded
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('status', 'deposit_detected')\
+            .is_('deposit_tx_hash', 'null')\
+            .execute()
+        
+        exchanges = result.data or []
+        
+        for exchange in exchanges:
+            try:
+                exchange_id = exchange['id']
+                from_currency = exchange['from_currency']
+                to_currency = exchange['to_currency']
+                amount = Decimal(exchange['from_amount'])
+                deposit_address = exchange['deposit_address']
+                
+                # Get wallet credentials
+                wallet_result = supabase.table('escrow_wallets')\
+                    .select('*')\
+                    .eq('address', deposit_address)\
+                    .eq('currency', from_currency)\
+                    .single()\
+                    .execute()
+                
+                if not wallet_result.data:
+                    app.logger.error(f"Exchange {exchange_id}: Wallet not found")
+                    continue
+                
+                wallet = wallet_result.data
+                
+                # Get SwapKit quote for deposit address
+                swapkit_from = map_currency_to_swapkit(from_currency)
+                swapkit_to = map_currency_to_swapkit(to_currency)
+                platform_to_address = get_platform_fee_address(to_currency)
+                
+                quote_response = swapkit_request('POST', '/quote', data={
+                    'sellAsset': swapkit_from,
+                    'buyAsset': swapkit_to,
+                    'sellAmount': str(amount),
+                    'sourceAddress': deposit_address,
+                    'destinationAddress': platform_to_address,
+                    'slippage': float(exchange.get('slippage_tolerance', DEFAULT_SLIPPAGE)),
+                    'includeTx': True
+                })
+                
+                routes = quote_response.get('routes', [])
+                if not routes:
+                    app.logger.error(f"Exchange {exchange_id}: No routes available")
+                    continue
+                
+                best_route = routes[0]
+                
+                # Get SwapKit deposit address
+                swapkit_deposit_address = best_route.get('targetAddress')
+                
+                if not swapkit_deposit_address:
+                    app.logger.error(f"Exchange {exchange_id}: No target address from SwapKit")
+                    continue
+                
+                # Send from temp wallet to SwapKit
+                tx_hash = send_crypto(
+                    from_address=deposit_address,
+                    to_address=swapkit_deposit_address,
+                    amount=amount,
+                    currency=from_currency,
+                    private_key_or_mnemonic=wallet['mnemonic']
+                )
+                
+                # Update exchange with transaction hash
+                supabase.table('crypto_exchanges').update({
+                    'status': 'swapping',
+                    'deposit_tx_hash': tx_hash,
+                    'deposit_confirmed_at': datetime.utcnow().isoformat(),
+                    'swapkit_response': quote_response,
+                    'updated_at': datetime.utcnow().isoformat(),
+                    'metadata': {
+                        **exchange.get('metadata', {}),
+                        'swapkit_deposit_address': swapkit_deposit_address,
+                        'forwarded_to_swapkit_at': datetime.utcnow().isoformat()
+                    }
+                }).eq('id', exchange_id).execute()
+                
+                app.logger.info(f"Exchange {exchange_id}: Forwarded to SwapKit, TX: {tx_hash}")
+                
+            except Exception as e:
+                app.logger.error(f"Error forwarding {exchange.get('id')}: {e}\n{traceback.format_exc()}")
+                
+                # Mark as failed
+                supabase.table('crypto_exchanges').update({
+                    'status': 'failed',
+                    'error_message': str(e),
+                    'updated_at': datetime.utcnow().isoformat()
+                }).eq('id', exchange['id']).execute()
+                continue
+        
+    except Exception as e:
+        app.logger.error(f"Forward processing error: {e}\n{traceback.format_exc()}")
+
+def poll_swapkit_status():
+    """
+    Poll SwapKit /track endpoint for swap status updates
+    
+    This is the key difference - we POLL instead of receiving webhooks
+    """
+    try:
+        app.logger.info("Polling SwapKit status...")
+        
+        # Get exchanges currently swapping
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .in_('status', ['swapping', 'confirming'])\
+            .not_.is_('deposit_tx_hash', 'null')\
+            .execute()
+        
+        exchanges = result.data or []
+        
+        for exchange in exchanges:
+            try:
+                exchange_id = exchange['id']
+                tx_hash = exchange['deposit_tx_hash']
+                from_currency = exchange['from_currency']
+                
+                # Track transaction using SwapKit
+                track_response = swapkit_track_transaction(tx_hash, from_currency)
+                
+                if not track_response:
+                    continue
+                
+                # Log the tracking check
+                supabase.table('swapkit_track_log').insert({
+                    'exchange_id': exchange_id,
+                    'transaction_hash': tx_hash,
+                    'chain_id': from_currency,
+                    'status': track_response.get('status'),
+                    'response': track_response,
+                    'checked_at': datetime.utcnow().isoformat()
+                }).execute()
+                
+                # Parse status
+                new_status = parse_track_status(track_response)
+                
+                if new_status and new_status != exchange['status']:
+                    updates = {
+                        'status': new_status,
+                        'swapkit_response': track_response,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }
+                    
+                    # If swap completed, mark ready for payout
+                    if new_status == 'swap_complete':
+                        updates['user_payout_pending'] = True
+                        app.logger.info(f"Exchange {exchange_id}: Swap complete! Ready for payout")
+                    
+                    supabase.table('crypto_exchanges').update(updates).eq('id', exchange_id).execute()
+                    
+                    app.logger.info(f"Exchange {exchange_id}: Status {exchange['status']} → {new_status}")
+                
+            except Exception as e:
+                app.logger.error(f"Error polling status for {exchange.get('id')}: {e}")
+                continue
+        
+    except Exception as e:
+        app.logger.error(f"Status polling error: {e}\n{traceback.format_exc()}")
+
+def send_payout_transaction(from_address, to_address, amount, currency, destination_tag=None):
+    """
+    Send payout transaction using Tatum API
+    
+    Args:
+        from_address: Platform wallet address
+        to_address: User's destination address
+        amount: Amount to send (Decimal)
+        currency: Currency code (e.g., 'BTC', 'ETH', 'USDT-ERC20')
+        destination_tag: Optional tag/memo for XRP, XLM, etc.
+    
+    Returns:
+        Transaction hash string
+    
+    Raises:
+        Exception: If transaction fails
+    """
+    try:
+        TATUM_API_KEY = os.getenv('TATUM_API_KEY')
+        if not TATUM_API_KEY:
+            raise Exception("TATUM_API_KEY not configured")
+        
+        # Get private key for this currency's platform wallet
+        private_key = get_platform_wallet_private_key(currency)
+        
+        headers = {
+            'x-api-key': TATUM_API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        # Map currency to Tatum chain
+        chain_map = {
+            'BTC': 'bitcoin',
+            'ETH': 'ethereum',
+            'SOL': 'solana',
+            'LTC': 'litecoin',
+            'BCH': 'bcash',
+            'DOGE': 'dogecoin',
+            'XRP': 'xrp',
+            'ADA': 'cardano',
+            'DOT': 'polkadot',
+            'MATIC': 'polygon',
+            'AVAX': 'avax',
+            'BNB': 'bsc',
+            'TRX': 'tron',
+            'ATOM': 'cosmos',
+            'XLM': 'xlm',
+            'USDT-ERC20': 'ethereum',
+            'USDT-BEP20': 'bsc',
+            'USDT-SOL': 'solana',
+            'USDT-TRON': 'tron',
+        }
+        
+        chain = chain_map.get(currency)
+        if not chain:
+            raise ValueError(f"Unsupported currency for payout: {currency}")
+        
+        # Build transaction payload
+        payload = {
+            'from': from_address,
+            'to': to_address,
+            'amount': str(amount),
+            'privateKey': private_key
+        }
+        
+        # Handle ERC-20 tokens
+        if currency == 'USDT-ERC20':
+            payload['contractAddress'] = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
+            payload['digits'] = 6
+        elif currency == 'USDC-ERC20':
+            payload['contractAddress'] = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+            payload['digits'] = 6
+        elif currency == 'USDT-BEP20':
+            payload['contractAddress'] = '0x55d398326f99059fF775485246999027B3197955'
+            payload['digits'] = 18
+        elif currency == 'USDT-TRON':
+            payload['tokenAddress'] = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+        elif currency == 'USDT-SOL':
+            payload['tokenAddress'] = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+        
+        # Handle destination tags for XRP/XLM
+        if chain == 'xrp' and destination_tag:
+            payload['destinationTag'] = int(destination_tag)
+        elif chain == 'xlm' and destination_tag:
+            payload['message'] = destination_tag
+        
+        # Send transaction
+        app.logger.info(f"Sending payout: {amount} {currency} from {from_address} to {to_address}")
+        
+        response = requests.post(
+            f'https://api.tatum.io/v3/{chain}/transaction',
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            error_msg = response.text
+            try:
+                error_json = response.json()
+                error_msg = error_json.get('message', error_json.get('error', error_msg))
+            except:
+                pass
+            raise Exception(f"Tatum transaction failed ({response.status_code}): {error_msg}")
+        
+        tx_data = response.json()
+        tx_hash = tx_data.get('txId')
+        
+        if not tx_hash:
+            raise Exception(f"No transaction hash in response: {tx_data}")
+        
+        app.logger.info(f"Payout transaction sent successfully: {tx_hash}")
+        return tx_hash
+        
+    except Exception as e:
+        app.logger.error(f"Send payout transaction error: {e}")
+        raise
+
+def process_user_payouts():
+    """
+    Process payouts to users after SwapKit completes swap
+    
+    Flow:
+    1. Find exchanges ready for payout (status: swap_complete)
+    2. Verify platform wallet has received funds
+    3. Send user portion to their destination address
+    4. Platform fee stays in platform wallet
+    5. Mark exchange as completed
+    """
+    try:
+        app.logger.info("Processing user payouts...")
+        
+        # Get exchanges ready for payout
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('user_payout_pending', True)\
+            .eq('status', 'swap_complete')\
+            .is_('user_payout_tx_hash', 'null')\
+            .execute()
+        
+        exchanges = result.data or []
+        
+        if not exchanges:
+            app.logger.info("No exchanges ready for payout")
+            return
+        
+        app.logger.info(f"Processing {len(exchanges)} payouts")
+        
+        for exchange in exchanges:
+            exchange_id = None
+            try:
+                exchange_id = exchange['id']
+                to_currency = exchange['to_currency']
+                user_amount = Decimal(str(exchange['user_payout_amount']))
+                platform_fee = Decimal(str(exchange['platform_fee_amount']))
+                destination_address = exchange['destination_address']
+                platform_wallet = exchange['platform_fee_address']
+                destination_tag = exchange.get('metadata', {}).get('destination_tag')
+                
+                app.logger.info(f"Exchange {exchange_id}: Processing {user_amount} {to_currency} payout")
+                
+                # ============================================
+                # STEP 1: VERIFY PLATFORM WALLET BALANCE
+                # ============================================
+                
+                try:
+                    platform_balance = get_wallet_balance(platform_wallet, to_currency)
+                    total_needed = user_amount + platform_fee  # Total we should have received
+                    
+                    if platform_balance < total_needed:
+                        app.logger.warning(
+                            f"Exchange {exchange_id}: Insufficient balance in platform wallet. "
+                            f"Expected {total_needed} {to_currency}, have {platform_balance} {to_currency}. "
+                            f"Waiting for funds..."
+                        )
+                        continue  # Skip this exchange, retry next cycle
+                    
+                    app.logger.info(f"Exchange {exchange_id}: Platform balance verified ({platform_balance} {to_currency})")
+                    
+                except Exception as balance_error:
+                    app.logger.error(f"Exchange {exchange_id}: Balance check failed: {balance_error}")
+                    continue  # Skip and retry later
+                
+                # ============================================
+                # STEP 2: CALCULATE FINAL PAYOUT AMOUNT
+                # ============================================
+                
+                # Deduct estimated network fee from user amount
+                network_fee = estimate_network_fee(to_currency)
+                final_payout_amount = user_amount - network_fee
+                
+                if final_payout_amount <= 0:
+                    app.logger.error(
+                        f"Exchange {exchange_id}: Payout amount too small after network fees. "
+                        f"User amount: {user_amount}, Network fee: {network_fee}"
+                    )
+                    
+                    # Mark as failed
+                    supabase.table('crypto_exchanges').update({
+                        'status': 'failed',
+                        'error_message': f'Amount too small to send after network fees ({network_fee} {to_currency})',
+                        'user_payout_pending': False,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('id', exchange_id).execute()
+                    continue
+                
+                app.logger.info(
+                    f"Exchange {exchange_id}: Sending {final_payout_amount} {to_currency} "
+                    f"(after {network_fee} network fee)"
+                )
+                
+                # ============================================
+                # STEP 3: SEND PAYOUT TRANSACTION
+                # ============================================
+                
+                try:
+                    tx_hash = send_payout_transaction(
+                        from_address=platform_wallet,
+                        to_address=destination_address,
+                        amount=final_payout_amount,
+                        currency=to_currency,
+                        destination_tag=destination_tag
+                    )
+                    
+                    if not tx_hash:
+                        raise Exception("Transaction returned no hash")
+                    
+                    app.logger.info(f"Exchange {exchange_id}: Payout sent successfully! TX: {tx_hash}")
+                    
+                except Exception as tx_error:
+                    app.logger.error(f"Exchange {exchange_id}: Payout transaction failed: {tx_error}")
+                    
+                    # Increment retry count
+                    retry_count = (exchange.get('retry_count', 0) or 0) + 1
+                    
+                    # After 5 retries, mark as failed
+                    if retry_count >= 5:
+                        supabase.table('crypto_exchanges').update({
+                            'status': 'failed',
+                            'error_message': f"Payout failed after {retry_count} attempts: {str(tx_error)}",
+                            'user_payout_pending': False,
+                            'retry_count': retry_count,
+                            'updated_at': datetime.utcnow().isoformat()
+                        }).eq('id', exchange_id).execute()
+                        
+                        app.logger.error(f"Exchange {exchange_id}: Marked as failed after {retry_count} retries")
+                    else:
+                        # Update retry count and schedule retry
+                        supabase.table('crypto_exchanges').update({
+                            'retry_count': retry_count,
+                            'last_retry_at': datetime.utcnow().isoformat(),
+                            'error_message': f"Payout attempt {retry_count} failed: {str(tx_error)}",
+                            'updated_at': datetime.utcnow().isoformat()
+                        }).eq('id', exchange_id).execute()
+                        
+                        app.logger.warning(f"Exchange {exchange_id}: Retry {retry_count}/5 scheduled")
+                    
+                    continue
+                
+                # ============================================
+                # STEP 4: UPDATE EXCHANGE AS COMPLETED
+                # ============================================
+                
+                supabase.table('crypto_exchanges').update({
+                    'status': 'completed',
+                    'user_payout_pending': False,
+                    'user_payout_tx_hash': tx_hash,
+                    'user_payout_sent_at': datetime.utcnow().isoformat(),
+                    'completed_at': datetime.utcnow().isoformat(),
+                    'updated_at': datetime.utcnow().isoformat(),
+                    'metadata': {
+                        **exchange.get('metadata', {}),
+                        'final_payout_amount': str(final_payout_amount),
+                        'network_fee_deducted': str(network_fee),
+                        'payout_tx_hash': tx_hash
+                    }
+                }).eq('id', exchange_id).execute()
+                
+                app.logger.info(f"Exchange {exchange_id}: Marked as completed ✓")
+                
+                # ============================================
+                # STEP 5: LOG FEE COLLECTION (Optional)
+                # ============================================
+                
+                try:
+                    supabase.table('exchange_fee_ledger').insert({
+                        'exchange_id': exchange_id,
+                        'fee_type': 'platform',
+                        'currency': to_currency,
+                        'amount': str(platform_fee),
+                        'collected': True,
+                        'collected_at': datetime.utcnow().isoformat(),
+                        'destination_address': platform_wallet,
+                        'metadata': {
+                            'user_payout_tx': tx_hash,
+                            'user_payout_amount': str(final_payout_amount)
+                        }
+                    }).execute()
+                except Exception as fee_log_error:
+                    app.logger.error(f"Failed to log fee collection: {fee_log_error}")
+                    # Don't fail the payout if fee logging fails
+                
+            except Exception as e:
+                if exchange_id:
+                    app.logger.error(f"Error processing exchange {exchange_id}: {e}\n{traceback.format_exc()}")
+                else:
+                    app.logger.error(f"Error processing exchange (unknown ID): {e}\n{traceback.format_exc()}")
+                continue
+        
+        app.logger.info("Payout processing complete")
+        
+    except Exception as e:
+        app.logger.error(f"Payout processing error: {e}\n{traceback.format_exc()}")
+
+def check_expired_exchanges():
+    """Mark expired exchanges"""
+    try:
+        # Rate expired
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('status', 'pending')\
+            .execute()
+        
+        for exchange in result.data or []:
+            if exchange.get('rate_expires_at'):
+                expires = datetime.fromisoformat(exchange['rate_expires_at'].replace('Z', '+00:00'))
+                if datetime.utcnow() > expires:
+                    supabase.table('crypto_exchanges').update({
+                        'status': 'rate_expired',
+                        'error_message': 'Rate expired',
+                        'updated_at': datetime.utcnow().isoformat()
+                    }).eq('id', exchange['id']).execute()
+        
+        # Stale exchanges
+        stale_time = datetime.utcnow() - timedelta(seconds=EXCHANGE_MAX_PENDING_AGE)
+        
+        result = supabase.table('crypto_exchanges')\
+            .select('*')\
+            .eq('status', 'pending')\
+            .lt('created_at', stale_time.isoformat())\
+            .execute()
+        
+        for exchange in result.data or []:
+            supabase.table('crypto_exchanges').update({
+                'status': 'expired',
+                'error_message': 'Exchange expired',
+                'updated_at': datetime.utcnow().isoformat()
+            }).eq('id', exchange['id']).execute()
+        
+    except Exception as e:
+        app.logger.error(f"Expired check error: {e}")
+
+def monitor_exchanges():
+    """
+    Main monitoring loop - POLLING based (no webhooks)
+    """
+    while True:
+        try:
+            app.logger.info("=== Exchange monitor cycle ===")
+            
+            # 1. Check for deposits
+            monitor_deposit_wallets()
+            
+            # 2. Forward to SwapKit
+            process_swapkit_forwards()
+            
+            # 3. POLL SwapKit status (not webhooks!)
+            poll_swapkit_status()
+            
+            # 4. Process user payouts
+            process_user_payouts()
+            
+            # 5. Check expired
+            check_expired_exchanges()
+            
+            app.logger.info("=== Cycle complete ===")
+            
+        except Exception as e:
+            app.logger.error(f"Monitor error: {e}\n{traceback.format_exc()}")
+        
+        time.sleep(EXCHANGE_STATUS_CHECK_INTERVAL)
+
+
+# ============================================
+# STARTUP VALIDATION
+# ============================================
+
+def validate_configuration():
+    """
+    Validate all required configuration on startup
+    
+    Checks:
+    - Required environment variables
+    - Fee addresses configured
+    - Database connectivity
+    - SwapKit API connectivity
+    """
+    errors = []
+    warnings = []
+    
+    # Required env vars
+    required_vars = [
+        'SUPABASE_URL',
+        'SUPABASE_SERVICE_KEY',
+        'SUPABASE_JWT_SECRET',
+        'SWAPKIT_API_KEY'
+    ]
+    
+    for var in required_vars:
+        if not os.getenv(var):
+            errors.append(f"Missing required environment variable: {var}")
+    
+    # Fee addresses
+    missing_addresses = []
+    for currency, address in FEE_ADDRESSES.items():
+        if not address:
+            missing_addresses.append(currency)
+    
+    if missing_addresses:
+        warnings.append(f"Missing fee addresses for: {', '.join(missing_addresses)}")
+    
+    # Tatum API key (optional but recommended)
+    if not os.getenv('TATUM_API_KEY'):
+        warnings.append("TATUM_API_KEY not configured - wallet generation will not work")
+    
+    # Test database connectivity (catch DNS/network errors separately)
+    try:
+        try:
+            supabase.table('profiles').select('id').limit(1).execute()
+        except Exception as e:
+            # If it's a DNS resolution error, provide a clearer message
+            if isinstance(e, Exception) and 'getaddrinfo' in str(e):
+                errors.append(f"Database connection failed: DNS lookup failed for SUPABASE_URL host. Raw error: {str(e)}")
+            else:
+                errors.append(f"Database connection failed: {str(e)}")
+    except Exception as e:
+        # Fallback catch-all (shouldn't normally be reached)
+        errors.append(f"Database connection test raised unexpected error: {str(e)}")
+    
+    # Test SwapKit connectivity (give clearer DNS/network hints)
+    try:
+        try:
+            swapkit_request('GET', '/providers')
+        except Exception as e:
+            if isinstance(e, Exception) and 'getaddrinfo' in str(e):
+                errors.append(f"SwapKit API connection failed: DNS lookup failed. Raw error: {str(e)}")
+            else:
+                errors.append(f"SwapKit API connection failed: {str(e)}")
+    except Exception as e:
+        errors.append(f"SwapKit connection test raised unexpected error: {str(e)}")
+    
+    # Print results
+    if errors:
+        app.logger.error("❌ Configuration errors:")
+        dns_issues = any('DNS lookup failed' in e or 'getaddrinfo' in e for e in errors)
+        for error in errors:
+            app.logger.error(f"  - {error}")
+
+        # Add quick remediation hints for common DNS/network problems
+        if dns_issues:
+            app.logger.error("  → Hint: DNS lookup failed. Check that SUPABASE_URL is correct and your machine has network/DNS access.")
+            app.logger.error("  → Example: set SUPABASE_URL to 'https://<project>.supabase.co' and ensure no trailing slashes or typos.")
+            app.logger.error("  → If behind a proxy or corporate network, ensure DNS resolution is allowed or configure proxy settings.")
+
+        # Add hint for missing env vars
+        missing_envs = [v for v in required_vars if not os.getenv(v)]
+        if missing_envs:
+            app.logger.error(f"  → Missing env vars: {', '.join(missing_envs)}. Use your .env or set them in the environment before starting.")
+
+        raise Exception("Configuration validation failed. See errors above.")
+    
+    if warnings:
+        app.logger.warning("⚠️  Configuration warnings:")
+        for warning in warnings:
+            app.logger.warning(f"  - {warning}")
+    
+    app.logger.info("✅ Configuration validation passed")
+    
+    # Log active currencies
+    active_currencies = [c for c, a in FEE_ADDRESSES.items() if a]
+    app.logger.info(f"✅ Active currencies ({len(active_currencies)}): {', '.join(active_currencies)}")
+
+# ===========================================
+# BACKGROUND TASK SCHEDULER (Simple implementation)
+# ===========================================
+
+def setup_background_tasks():
+    """Setup background tasks for analytics maintenance"""
+    import threading
+    import time
+
+    def cache_cleanup_worker():
+        """Background worker for cache cleanup"""
+        while True:
+            try:
+                time.sleep(3600)  # Run every hour
+                cleanup_expired_cache_background()
+                anonymize_old_analytics_data()
+            except Exception as e:
+                app.logger.error(f"Background task error: {e}")
+
+    # Start background thread
+    cleanup_thread = threading.Thread(target=cache_cleanup_worker, daemon=True)
+    cleanup_thread.start()
+    app.logger.info("Background analytics tasks started")
+
+def cleanup_expired_cache_background():
+    """Background cache cleanup function"""
+    try:
+        # Clean listing analytics cache
+        supabase.table('listing_analytics_cache')\
+            .delete()\
+            .lt('expires_at', datetime.now().isoformat())\
+            .execute()
+
+        # Clean seller analytics cache
+        supabase.table('seller_analytics_cache')\
+            .delete()\
+            .lt('expires_at', datetime.now().isoformat())\
+            .execute()
+
+        app.logger.info("Background cache cleanup completed")
+        return True
+
+    except Exception as e:
+        app.logger.error(f"Error in background cache cleanup: {e}")
+        return False
+
+# Initialize background tasks when app starts
+# Note: In production, use a proper task scheduler like Celery
+@app.before_request
+def initialize_background_tasks():
+    """Initialize background tasks on first request"""
+    if not hasattr(app, '_background_tasks_initialized'):
+        disable_bg = os.getenv('DISABLE_BACKGROUND_TASKS','').lower() in ('1','true','yes')
+        if not app.config.get('TESTING', False) and not disable_bg:
+            setup_background_tasks()
+        app._background_tasks_initialized = True
+
+
+
+
+
+# -- Explicitly ensure the seller products route accepts GET/OPTIONS --
+# Some decorator interactions or runtime registration order can accidentally
+# register a path without GET allowed. This explicit add_url_rule call
+# guarantees the path accepts GET and routes to the function defined above.
+try:
+    app.add_url_rule('/api/marketplace/seller/products',
+                     endpoint='get_seller_products_explicit',
+                     view_func=get_seller_products,
+                     methods=['GET','OPTIONS'])
+except Exception as _e:
+    # If this fails (e.g., endpoint already registered), log and continue.
+    try:
+        app.logger.info(f"Could not add explicit rule for seller/products: {_e}")
+    except Exception:
+        pass
+
+
+
+if __name__ == '__main__':
+    # Validate configuration before starting
+    validate_configuration()
+    
+    # Start background monitor (only in production)
+    if os.getenv('FLASK_ENV') == 'production' or os.getenv('START_MONITOR', 'false').lower() == 'true':
+        monitor_thread = Thread(target=monitor_exchanges, daemon=True)
+        monitor_thread.start()
+        app.logger.info("✅ Background exchange monitor started")
+    else:
+        app.logger.info("ℹ️  Background monitor disabled (set START_MONITOR=true to enable)")
+    
+    # Get port from environment
+    port = int(os.getenv('PORT', 5000))
+    
+    # Start Flask app
+    app.logger.info(f"🚀 Starting Medius backend on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)

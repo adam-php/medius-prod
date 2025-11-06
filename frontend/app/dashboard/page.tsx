@@ -18,6 +18,7 @@ import {
   RefreshCcw,
   CheckCircle,
   ShoppingBag,
+  ArrowLeftRight,
 } from "lucide-react"
 import { ArrowDownIcon, ArrowUpIcon, Share2Icon, UsersIcon, Search } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -75,7 +76,7 @@ function VolumeDisplay({
 function DealsBreakdownBar({
   completed,
   active,
-  disputed = 0, // optional third segment
+  disputed = 0,
   total,
   height = 12,
 }: {
@@ -86,17 +87,17 @@ function DealsBreakdownBar({
   height?: number
 }) {
   const segments = [
-    { key: "active", label: "Active", count: active, color: "#fb923c" }, // left (orange)
-    ...(disputed > 0 ? [{ key: "disputed", label: "Disputed", count: disputed, color: "#f87171" }] : []), // middle (red)
-    { key: "completed", label: "Completed", count: completed, color: "#34d399" }, // right (green)
+    { key: "active", label: "Active", count: active, color: "#fb923c" },
+    ...(disputed > 0 ? [{ key: "disputed", label: "Disputed", count: disputed, color: "#f87171" }] : []),
+    { key: "completed", label: "Completed", count: completed, color: "#34d399" },
   ]
 
   if (disputed > 0) {
-    segments.push({ key: "disputed", label: "Disputed", count: disputed, color: "#f87171" }) // red
+    segments.push({ key: "disputed", label: "Disputed", count: disputed, color: "#f87171" })
   }
 
   const sum = segments.reduce((acc, s) => acc + s.count, 0)
-  const base = total || sum // fallback to sum if total is 0
+  const base = total || sum
 
   return (
     <div className="min-w-[220px]">
@@ -170,8 +171,8 @@ function DealsDonut({
   const activeLen = total ? (active / total) * c : 0
 
   const colors = {
-    completed: "#34d399", // green-400
-    active: "#fb923c", // orange-400
+    completed: "#34d399",
+    active: "#fb923c",
     track: "rgba(255,255,255,0.12)",
   }
 
@@ -197,7 +198,7 @@ function DealsDonut({
               className="transition-[stroke-dasharray] duration-700 ease-out"
             />
           )}
-          {/* Active segment (starts where completed ends) */}
+          {/* Active segment */}
           {active > 0 && (
             <circle
               cx={cx}
@@ -257,7 +258,7 @@ export default function Dashboard() {
       if (!isSupabaseConfigured()) {
         console.warn("Supabase not configured, using demo data")
         setUser({ email: "demo@example.com", id: "demo-user" })
-        setEscrows([]) // Use empty array for demo
+        setEscrows([])
         setLoading(false)
         return
       }
@@ -407,12 +408,7 @@ export default function Dashboard() {
       const id = (e.id || "").toLowerCase()
       const currency = (e.currency || "").toLowerCase()
       const status = (e.status || "").toLowerCase()
-      return (
-        title.includes(query) ||
-        id.includes(query) ||
-        currency.includes(query) ||
-        status.includes(query)
-      )
+      return title.includes(query) || id.includes(query) || currency.includes(query) || status.includes(query)
     })
   }, [escrows, searchQuery])
 
@@ -432,29 +428,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-black relative overflow-hidden">
-      <motion.div
-        initial={{ x: -24, y: -24, opacity: 0 }}
-        animate={{ x: 0, y: 0, opacity: 1 }}
-        transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-        className="absolute top-0 left-0 -z-10 rounded-2xl overflow-hidden pointer-events-none mix-blend-screen"
-        style={{
-          // Square sized to fit within the top-left quarter on all screens
-          width: "min(50vw, 50vh)",
-          height: "min(50vw, 50vh)",
-          background:
-            // Hotspot for extra brightness near the corner
-            "radial-gradient(28% 28% at 18% 14%, rgba(255,180,110,0.78) 0%, rgba(255,180,110,0.00) 60%), " +
-            // Main soft glow
-            "radial-gradient(70% 70% at 25% 20%, rgba(251,146,60,0.62) 0%, rgba(251,146,60,0.00) 62%), " +
-            // Subtle directional wash
-            "linear-gradient(135deg, rgba(251,146,60,0.34) 0%, rgba(251,146,60,0.00) 70%)",
-        }}
-      />
-
-      {/* Orange glows */}
-      
-
-      {/* Desktop Sidebar (unchanged) */}
+      {/* Desktop Sidebar */}
       <motion.aside
         initial={{ x: -10, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
@@ -479,7 +453,23 @@ export default function Dashboard() {
               <LayoutDashboard className="h-5 w-5" />
               <span className="font-medium">Overview</span>
             </Link>
-            
+
+            <Link
+              href="/marketplace"
+              className="flex items-center space-x-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-white/5 hover:text-white transition-all duration-200"
+            >
+              <ShoppingBag className="h-5 w-5" />
+              <span className="font-medium">Marketplace</span>
+            </Link>
+
+            <Link
+              href="/exchange"
+              className="flex items-center space-x-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-white/5 hover:text-white transition-all duration-200"
+            >
+              <ArrowLeftRight className="h-5 w-5" />
+              <span className="font-medium">Exchange</span>
+            </Link>
+
             <Link
               href="/marketplace/create"
               className="flex items-center space-x-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-white/5 hover:text-white transition-all duration-200"
@@ -495,7 +485,7 @@ export default function Dashboard() {
               <span className="font-medium">Messages</span>
             </Link>
             <div className="my-2 h-px bg-white/10" role="separator" aria-hidden="true" />
-            
+
             <Link
               href="/profile"
               className="flex items-center space-x-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-white/5 hover:text-white transition-all duration-200"
@@ -514,7 +504,7 @@ export default function Dashboard() {
         </div>
       </motion.aside>
 
-      {/* Mobile Drawer — now includes former navbar items (Contact + Login/Logout) */}
+      {/* Mobile Drawer */}
       <AnimatePresence>
         {mobileNavOpen && (
           <div className="lg:hidden fixed inset-0 z-50">
@@ -585,6 +575,16 @@ export default function Dashboard() {
                   >
                     <ShoppingBag className="h-5 w-5" />
                     <span className="font-medium">Marketplace</span>
+                  </Link>
+                </motion.div>
+                <motion.div initial={{ y: 6, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.04 }}>
+                  <Link
+                    href="/exchange"
+                    onClick={() => setMobileNavOpen(false)}
+                    className="flex items-center space-x-3 px-4 py-3 rounded-xl text-gray-300 hover:bg-white/5 hover:text-white transition-all duration-200"
+                  >
+                    <ArrowLeftRight className="h-5 w-5" />
+                    <span className="font-medium">Exchange</span>
                   </Link>
                 </motion.div>
                 <motion.div initial={{ y: 6, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.05 }}>
@@ -698,7 +698,11 @@ export default function Dashboard() {
                 {user && <p className="text-gray-400 text-sm sm:text-base">Welcome back, {user.email}</p>}
               </motion.div>
             </div>
-            <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="flex items-center gap-3 w-full sm:w-auto sm:gap-4 sm:justify-end">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.98 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="flex items-center gap-3 w-full sm:w-auto sm:gap-4 sm:justify-end"
+            >
               <AddNewEscrowButton className="hidden sm:inline-flex" />
             </motion.div>
           </div>
@@ -797,8 +801,6 @@ export default function Dashboard() {
                   </Card>
                 </motion.div>
               </div>
-
-              {/* Removed large volume chart to keep first escrow above the fold */}
             </div>
 
             {/* Search Bar */}
@@ -830,7 +832,9 @@ export default function Dashboard() {
                 <div className="w-14 h-14 sm:w-16 sm:h-16 bg-orange-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
                   <ClipboardList className="text-orange-400 h-8 w-8" />
                 </div>
-                <h3 className="text-lg sm:text-xl font-bold text-white mb-2">{escrows.length === 0 ? "No Escrows Yet" : "No matching escrows"}</h3>
+                <h3 className="text-lg sm:text-xl font-bold text-white mb-2">
+                  {escrows.length === 0 ? "No Escrows Yet" : "No matching escrows"}
+                </h3>
                 <p className="text-gray-400 mb-6">
                   {escrows.length === 0
                     ? "You haven't created or participated in any escrow transactions yet."
@@ -846,17 +850,15 @@ export default function Dashboard() {
                       <span>{"→"}</span>
                     </Link>
                   </motion.div>
-                ) : (
-                  searchQuery ? (
-                    <motion.button
-                      whileHover={{ scale: 1.03 }}
-                      onClick={() => setSearchQuery("")}
-                      className="inline-flex items-center justify-center px-5 py-3 bg-white/10 hover:bg-white/15 border border-white/20 text-white rounded-xl font-medium"
-                    >
-                      Clear search
-                    </motion.button>
-                  ) : null
-                )}
+                ) : searchQuery ? (
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    onClick={() => setSearchQuery("")}
+                    className="inline-flex items-center justify-center px-5 py-3 bg-white/10 hover:bg-white/15 border border-white/20 text-white rounded-xl font-medium"
+                  >
+                    Clear search
+                  </motion.button>
+                ) : null}
               </motion.div>
             ) : (
               <motion.div
@@ -898,9 +900,7 @@ export default function Dashboard() {
                     >
                       <div className="grid grid-cols-5 gap-4 items-center">
                         <div>
-                          <div className="font-medium text-white">
-                            {escrow.title || `#${escrow.id.slice(0, 8)}`}
-                          </div>
+                          <div className="font-medium text-white">{escrow.title || `#${escrow.id.slice(0, 8)}`}</div>
                           <div className="text-sm text-gray-400">
                             {new Date(escrow.created_at).toLocaleDateString()}
                           </div>
@@ -969,9 +969,7 @@ export default function Dashboard() {
                       >
                         <div className="flex items-start justify-between">
                           <div>
-                            <div className="font-medium text-white">
-                              {escrow.title || `#${escrow.id.slice(0, 8)}`}
-                            </div>
+                            <div className="font-medium text-white">{escrow.title || `#${escrow.id.slice(0, 8)}`}</div>
                             <div className="text-xs text-gray-400">
                               {new Date(escrow.created_at).toLocaleDateString()}
                             </div>

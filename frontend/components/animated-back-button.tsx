@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { ChevronLeft } from "lucide-react"
 
 interface AnimatedBackButtonProps {
   onClick: () => void
@@ -20,27 +21,15 @@ export default function AnimatedBackButton({
       onClick={onClick}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      className={`relative text-gray-400 hover:text-orange-400 transition-colors duration-300 flex items-center ${className}`}
+      className={`group text-gray-400 hover:text-orange-400 transition-colors duration-300 flex items-center gap-2 mb-6 ${className}`}
     >
-      <div className="relative flex items-center min-w-0">
-        {/* Arrow that slides in from the left */}
-        <span
-          className={`transition-all duration-300 ease-out ${
-            isHovered ? "transform translate-x-0 opacity-100 mr-2" : "transform -translate-x-4 opacity-0 mr-0"
-          }`}
-        >
-          ←
-        </span>
+      <ChevronLeft
+        className={`w-4 h-4 transition-transform duration-300 ease-out ${
+          isHovered ? "transform -translate-x-1" : "transform translate-x-0"
+        }`}
+      />
 
-        {/* Text that stays in place but makes room for arrow */}
-        <span
-          className={`transition-all duration-300 ease-out whitespace-nowrap ${
-            isHovered ? "transform translate-x-0" : "transform -translate-x-2"
-          }`}
-        >
-          {text}
-        </span>
-      </div>
+      <span className="whitespace-nowrap">{text}</span>
     </button>
   )
 }

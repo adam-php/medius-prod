@@ -398,16 +398,23 @@ export default function CreateEscrow() {
         finalCurrency = currency
       }
 
+      // normalize USD amount as a number and round to 2 decimals
+      const usdAmountNum = Math.round((Number.parseFloat(usdAmount) || 0) * 100) / 100
+
       const payload: any = {
         initiator_role: role,
         counterparty_username: trimmedUsername,
         ...(role === "buyer" ? { seller_username: trimmedUsername } : {}),
         ...(role === "seller" ? { buyer_username: trimmedUsername } : {}),
         title: escrowTitle.trim(),
+        // “amount” is the crypto amount for crypto payments, or USD amount for PayPal
         amount: finalAmount,
         currency: finalCurrency,
         payment_method: paymentMethod,
-        usd_amount: Number.parseFloat(usdAmount),
+        // legacy field kept for backwards compatibility
+        usd_amount: usdAmountNum,
+        // NEW canonical USD field expected by analytics & queries
+        amount_usd: usdAmountNum,
       }
 
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/escrows`, {

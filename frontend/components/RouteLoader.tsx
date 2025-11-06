@@ -20,9 +20,12 @@ export default function RouteLoader() {
     <div
       aria-hidden
       className="fixed top-0 left-0 right-0 z-[60] pointer-events-none"
-      style={{ height: isNavigating ? 3 : 0, transition: "height 180ms ease" }}
+      style={{
+        height: isNavigating ? "clamp(2px, 0.5vw, 4px)" : 0,
+        transition: "height 180ms ease",
+      }}
     >
-      <div className="h-full w-full bg-gradient-to-r from-orange-400 via-orange-500 to-orange-600 animate-[progress_0.9s_ease_infinite]" />
+      <div className="h-full w-full bg-gradient-to-r from-orange-400 via-orange-500 to-orange-600 animate-[progress_0.9s_ease_infinite] shadow-sm" />
       <style jsx>{`
         @keyframes progress {
           0% { transform: translateX(-60%); }
@@ -34,5 +37,3 @@ export default function RouteLoader() {
     </div>
   )
 }
-
-

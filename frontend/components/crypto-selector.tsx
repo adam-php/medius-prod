@@ -32,28 +32,28 @@ interface CryptoSelectorProps {
   value?: string
   onValueChange?: (value: string) => void
   placeholder?: string
-  options?: { value: string; label: string; symbol: string }[]
+  className?: string
 }
 
 export function CryptoSelector({
   value,
   onValueChange,
   placeholder = "Select cryptocurrency...",
-  options: optionsProp,
+  className,
 }: CryptoSelectorProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
 
-  const options = optionsProp || ALL_CRYPTOS
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return options
-    return options.filter((c) =>
-      c.label.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q) || c.value.toLowerCase().includes(q),
+    if (!q) return ALL_CRYPTOS
+    return ALL_CRYPTOS.filter(
+      (c) =>
+        c.label.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q) || c.value.toLowerCase().includes(q),
     )
-  }, [query, options])
+  }, [query])
 
-  const selectedCrypto = options.find((crypto) => crypto.value === value)
+  const selectedCrypto = ALL_CRYPTOS.find((crypto) => crypto.value === value)
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -62,70 +62,95 @@ export function CryptoSelector({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className="w-full justify-between h-10 px-3 text-sm rounded-xl bg-black border border-white/10 text-white transition-all duration-200 hover:bg-black hover:border-white/20"
+          aria-haspopup="listbox"
+          aria-label="Select cryptocurrency"
+          className={cn(
+            "w-full justify-between h-12 px-4 text-sm rounded-xl bg-black border border-white/10 text-white transition-all duration-200 hover:bg-black hover:border-white/20 focus:ring-2 focus:ring-orange-500 focus:border-transparent",
+            className,
+          )}
         >
           {selectedCrypto ? (
             <div className="flex items-center gap-2 animate-in fade-in-0 slide-in-from-left-1 duration-200">
-              <span className="font-medium">{selectedCrypto.label}</span>
-              <span className="text-gray-400">({selectedCrypto.symbol})</span>
+              <span className="font-semibold text-white">{selectedCrypto.label}</span>
+              <span className="text-gray-400 text-xs">({selectedCrypto.symbol})</span>
             </div>
           ) : (
-            <span className="text-gray-400">{placeholder}</span>
+            <span className="text-gray-500">{placeholder}</span>
           )}
           <ChevronDown
             className={cn(
-              "ml-2 h-4 w-4 shrink-0 text-gray-400 transition-transform duration-300 ease-in-out",
-              open && "rotate-180 text-white",
+              "ml-2 h-4 w-4 shrink-0 text-gray-400 transition-all duration-300 ease-in-out",
+              open && "rotate-180 text-orange-400",
             )}
           />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 bg-black border border-white/10 rounded-xl shadow-xl data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 duration-200 ease-out">
+      <PopoverContent
+        className="w-[var(--radix-popover-trigger-width)] p-0 bg-black border border-white/20 rounded-xl shadow-2xl shadow-black/50"
+        align="start"
+        sideOffset={4}
+      >
         <div className="bg-black rounded-xl overflow-hidden">
-          <div className="flex items-center gap-2 p-2 border-b border-white/10 bg-black">
-            <Search className="h-4 w-4 text-gray-500" />
+          {/* Search Input */}
+          <div className="flex items-center gap-2 p-3 border-b border-white/10 bg-black sticky top-0 z-10">
+            <Search className="h-4 w-4 text-gray-400" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search cryptocurrency..."
               className="bg-transparent text-white placeholder:text-gray-500 flex-1 focus:outline-none text-sm"
+              aria-label="Search cryptocurrencies"
             />
           </div>
-          <div className="max-h-72 overflow-y-auto bg-black [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-black [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-white/30">
+
+          {/* Options List */}
+          <div
+            className="max-h-72 overflow-y-auto bg-black [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb:hover]:bg-white/30"
+            role="listbox"
+          >
             {filtered.length === 0 ? (
-              <div className="px-3 py-2 text-gray-400 text-sm">No cryptocurrency found.</div>
+              <div className="px-4 py-8 text-gray-400 text-sm text-center">No cryptocurrency found.</div>
             ) : (
-              filtered.map((crypto, index) => (
-                <button
-                  key={crypto.value}
-                  onClick={() => {
-                    const currentValue: string = crypto.value
-                    onValueChange?.(currentValue === (value || "") ? "" : currentValue)
-                    setOpen(false)
-                  }}
-                  className="w-full text-left px-3 py-2.5 text-sm text-white hover:bg:white/5 hover:bg-white/5 transition-colors duration-150 flex items-center gap-2"
-                  style={{ animationDelay: `${index * 50}ms` }}
-                >
-                  <div className="flex items-center gap-2 flex-1">
-                    <span className="font-medium">{crypto.label}</span>
-                    <span className="text-gray-400">({crypto.symbol})</span>
-                  </div>
-                  <Check
+              filtered.map((crypto) => {
+                const isSelected = value === crypto.value
+                return (
+                  <button
+                    key={crypto.value}
+                    onClick={() => {
+                      onValueChange?.(crypto.value)
+                      setOpen(false)
+                      setQuery("")
+                    }}
                     className={cn(
-                      "ml-auto h-4 w-4 transition-all duration-200",
-                      value === crypto.value ? "opacity-100 text-green-400 scale-100" : "opacity-0 scale-75",
+                      "w-full text-left px-4 py-3 text-sm transition-all duration-150 flex items-center gap-3 group",
+                      isSelected
+                        ? "bg-orange-500/10 text-white border-l-2 border-orange-500"
+                        : "text-gray-300 hover:bg-white/5 hover:text-white border-l-2 border-transparent",
                     )}
-                  />
-                </button>
-              ))
+                    role="option"
+                    aria-selected={isSelected}
+                  >
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <span className={cn("font-medium truncate", isSelected && "text-white")}>
+                        {crypto.label}
+                      </span>
+                      <span className={cn("text-xs flex-shrink-0", isSelected ? "text-orange-300" : "text-gray-400")}>
+                        ({crypto.symbol})
+                      </span>
+                    </div>
+                    <Check
+                      className={cn(
+                        "ml-auto h-4 w-4 flex-shrink-0 transition-all duration-200",
+                        isSelected ? "opacity-100 text-orange-400 scale-100" : "opacity-0 scale-75",
+                      )}
+                    />
+                  </button>
+                )
+              })
             )}
           </div>
         </div>
       </PopoverContent>
     </Popover>
   )
-}
-
-export function CryptoSelectorCompact(props: CryptoSelectorProps) {
-  return <CryptoSelector {...props} />
 }

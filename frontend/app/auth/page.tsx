@@ -1,5 +1,7 @@
 "use client"
 
+import type React from "react"
+
 import { useEffect, useMemo, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import Image from "next/image"
@@ -10,8 +12,8 @@ export default function AuthPage() {
   const searchParams = useSearchParams()
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 
+  const [isLogin, setIsLogin] = useState(true)
   const [email, setEmail] = useState("")
-  const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -23,117 +25,13 @@ export default function AuthPage() {
   useEffect(() => {
     const codeFromUrl = searchParams.get("ref")?.trim()
     if (codeFromUrl) {
-      try { localStorage.setItem("medius_ref_code", codeFromUrl) } catch {}
+      try {
+        localStorage.setItem("medius_ref_code", codeFromUrl)
+      } catch {}
     }
   }, [searchParams])
 
-  // Helper: insert username row in your 'profiles' table if missing.
-  // - only runs server-side via Supabase client here (RLS will ensure it's the user)
-  // - enforces lowercase + trim
-  async function ensureUsernameForSession(session: any, desiredUsername?: string, desiredEmail?: string) {
-    if (!session) {
-      console.log('ensureUsernameForSession: no session provided')
-      return
-    }
-    const userId = session.user.id
-    const finalEmail = desiredEmail || session.user.email || null
-    const finalUsername = desiredUsername ? desiredUsername.trim().toLowerCase() : null
-
-    console.log('ensureUsernameForSession called with:', {
-      userId,
-      desiredUsername,
-      desiredEmail,
-      sessionEmail: session.user.email,
-      finalUsername,
-      finalEmail
-    })
-
-    if (!finalUsername) {
-      console.log('ensureUsernameForSession: no username to store')
-      return
-    }
-
-    try {
-      // Check if this user's profile already has a username
-      console.log('ensureUsernameForSession: checking existing profile for user:', userId)
-      const { data: existingForUser, error: err1 } = await supabase
-        .from('profiles')
-        .select('id, username, email')
-        .eq('id', userId)
-        .maybeSingle()
-
-      if (err1) {
-        console.warn('ensureUsernameForSession: check existing profile error', err1)
-      } else {
-        console.log('ensureUsernameForSession: existing profile data:', existingForUser)
-      }
-
-      if (existingForUser && existingForUser.username) {
-        console.log('ensureUsernameForSession: user already has username, updating email if needed')
-        // already set for user; update email if missing and we have one
-        if (!existingForUser.email && finalEmail) {
-          const { error: updateErr } = await supabase
-            .from('profiles')
-            .update({ email: finalEmail })
-            .eq('id', userId)
-          if (updateErr) {
-            console.warn('ensureUsernameForSession: failed to update email', updateErr)
-          } else {
-            console.log('ensureUsernameForSession: successfully updated email')
-          }
-        }
-        return
-      }
-
-      // Check if the desired username is taken by someone else
-      console.log('ensureUsernameForSession: checking if username is taken:', finalUsername)
-      const { data: taken, error: err2 } = await supabase
-        .from('profiles')
-        .select('id, username')
-        .eq('username', finalUsername)
-        .maybeSingle()
-
-      if (err2) {
-        console.warn('ensureUsernameForSession: check username taken error', err2)
-      } else {
-        console.log('ensureUsernameForSession: username taken check result:', taken)
-      }
-
-      if (taken && taken.id !== userId) {
-        console.log('ensureUsernameForSession: username is taken by another user')
-        setError('That username is already taken. Please choose another.')
-        return
-      }
-
-      // Upsert username into profiles table
-      console.log('ensureUsernameForSession: upserting profile with:', {
-        id: userId,
-        username: finalUsername,
-        email: finalEmail
-      })
-      const { error: insertErr } = await supabase.from('profiles').upsert({
-        id: userId,
-        username: finalUsername,
-        email: finalEmail,
-      }, { onConflict: 'id' })
-
-      if (insertErr) {
-        console.warn('ensureUsernameForSession: insert username error', insertErr)
-        if (insertErr.message?.includes('duplicate') || insertErr.code === '23505') {
-          setError('That username is already taken. Please choose another.')
-        }
-      } else {
-        console.log('ensureUsernameForSession: successfully inserted/updated profile')
-        // success — remove pending keys
-        try { localStorage.removeItem('medius_pending_username') } catch {}
-        try { localStorage.removeItem('medius_pending_email') } catch {}
-      }
-    } catch (e) {
-      console.warn('ensureUsernameForSession failed with exception:', e)
-    }
-  }
-
-  // If already authenticated, claim referral (if any), then sync pending username/email and redirect
+  // If already authenticated, route to appropriate destination
   useEffect(() => {
     const run = async () => {
       const { data } = await supabase.auth.getSession()
@@ -141,19 +39,8 @@ export default function AuthPage() {
       if (!session) return
 
       try {
-        // If there's a pending username/email (from sign-up flow), try to insert it now
-        try {
-          const pendingUsername = typeof window !== 'undefined' ? (localStorage.getItem('medius_pending_username') || '') : ''
-          const pendingEmail = typeof window !== 'undefined' ? (localStorage.getItem('medius_pending_email') || '') : ''
-          if (pendingUsername) {
-            await ensureUsernameForSession(session, pendingUsername, pendingEmail || undefined)
-          }
-        } catch (e) {
-          console.warn('pending username sync failed', e)
-        }
-
-        const codeFromUrl = searchParams.get('ref')?.trim() || ""
-        const codeFromStorage = typeof window !== "undefined" ? (localStorage.getItem("medius_ref_code") || "") : ""
+        const codeFromUrl = searchParams.get("ref")?.trim() || ""
+        const codeFromStorage = typeof window !== "undefined" ? localStorage.getItem("medius_ref_code") || "" : ""
         const code = (codeFromUrl || codeFromStorage || "").trim()
         if (code) {
           await fetch(`${API_URL}/api/referrals/claim`, {
@@ -161,134 +48,66 @@ export default function AuthPage() {
             headers: {
               "Content-Type": "application/json",
               Authorization: `Bearer ${session.access_token}`,
-              'ngrok-skip-browser-warning': '1',
+              "ngrok-skip-browser-warning": "1",
             },
-            body: JSON.stringify({ code })
+            body: JSON.stringify({ code }),
           }).catch(() => {})
         }
       } finally {
-        try { if (typeof window !== "undefined") localStorage.removeItem("medius_ref_code") } catch {}
-        // Route based on whether the user has a username
         try {
-          const { data: { session } } = await supabase.auth.getSession()
-          if (session) {
-            const { data: row } = await supabase
-              .from("usernames")
-              .select("id")
-              .eq("user_id", session.user.id)
-              .maybeSingle()
-            router.replace(row ? "/dashboard" : "/onboarding/username")
-            return
-          }
+          if (typeof window !== "undefined") localStorage.removeItem("medius_ref_code")
         } catch {}
+        router.replace("/dashboard")
       }
     }
     run()
   }, [router, searchParams, API_URL])
 
-  const handleEmailSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
     setMessage(null)
     setLoading(true)
     try {
-      if (password) {
-        // Try password sign-in first
+      if (isLogin) {
+        // Sign in with password
         const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password })
-        if (!signInErr) {
-          // Claim referral & ensure username if provided
+        if (signInErr) throw signInErr
+
+        // Claim referral if needed
+        try {
+          const {
+            data: { session },
+          } = await supabase.auth.getSession()
+          const codeFromUrl = searchParams.get("ref")?.trim() || ""
+          const codeFromStorage = typeof window !== "undefined" ? localStorage.getItem("medius_ref_code") || "" : ""
+          const code = (codeFromUrl || codeFromStorage || "").trim()
+          if (session && code) {
+            await fetch(`${API_URL}/api/referrals/claim`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.access_token}`,
+                "ngrok-skip-browser-warning": "1",
+              },
+              body: JSON.stringify({ code }),
+            }).catch(() => {})
+          }
+        } finally {
           try {
-            const { data: { session } } = await supabase.auth.getSession()
-            // if user provided a username, insert it for this session
-            if (session && username.trim()) {
-              await ensureUsernameForSession(session, username.trim(), email)
-            }
-
-            const codeFromUrl = searchParams.get("ref")?.trim() || ""
-            const codeFromStorage = typeof window !== "undefined" ? (localStorage.getItem("medius_ref_code") || "") : ""
-            const code = (codeFromUrl || codeFromStorage || "").trim()
-            if (session && code) {
-              await fetch(`${API_URL}/api/referrals/claim`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}`, 'ngrok-skip-browser-warning': '1' },
-                body: JSON.stringify({ code })
-              }).catch(() => {})
-            }
-          } finally {
-            try { if (typeof window !== "undefined") localStorage.removeItem("medius_ref_code") } catch {}
-            // Decide destination based on whether the user has a username
-            try {
-              const { data: { session } } = await supabase.auth.getSession()
-              if (session) {
-                const { data: row } = await supabase.from("usernames").select("id").eq("user_id", session.user.id).maybeSingle()
-                router.replace(row ? "/dashboard" : "/onboarding/username")
-                return
-              }
-            } catch {}
-          }
-          return
+            if (typeof window !== "undefined") localStorage.removeItem("medius_ref_code")
+          } catch {}
+          router.replace("/dashboard")
         }
-
-        // If sign-in failed and a username was provided, attempt sign-up
-        if (username.trim()) {
-          // Save pending username/email so we can finish insertion after email confirmation
-          const finalUsername = username.trim().toLowerCase()
-          const finalEmail = email.trim()
-          console.log('handleEmailSubmit: saving pending data for sign-up:', { finalUsername, finalEmail })
-          try { localStorage.setItem('medius_pending_username', finalUsername) } catch {}
-          try { localStorage.setItem('medius_pending_email', finalEmail) } catch {}
-
-          const { data, error: signUpErr } = await supabase.auth.signUp({
-            email,
-            password,
-            options: { emailRedirectTo: callbackUrl, data: { username: username.trim().toLowerCase() } },
-          })
-          if (signUpErr) throw signUpErr
-
-          if (!data.session) {
-            // No immediate session (email confirmation flow) — we've saved the pending username/email to localStorage above.
-            setMessage("Check your email to confirm your account. After you confirm and the redirect happens we'll finish creating your username.")
-            return
-          }
-
-          // If signUp returned a session immediately, insert right away
-          try {
-            if (data.session) {
-              await ensureUsernameForSession(data.session, username.trim().toLowerCase(), email)
-            }
-          } finally {
-            try { if (typeof window !== "undefined") localStorage.removeItem("medius_pending_username") } catch {}
-            try { if (typeof window !== "undefined") localStorage.removeItem("medius_pending_email") } catch {}
-            try { if (typeof window !== "undefined") localStorage.removeItem("medius_ref_code") } catch {}
-            try {
-              const { data: { session } } = await supabase.auth.getSession()
-              if (session) {
-                const { data: row } = await supabase.from("usernames").select("id").eq("user_id", session.user.id).maybeSingle()
-                router.replace(row ? "/dashboard" : "/onboarding/username")
-                return
-              }
-            } catch {}
-          }
-          return
-        }
-
-        // If no username provided, surface sign-in error
-        throw signInErr
       } else {
-        // Magic link flow — we cannot insert username because there is no session yet.
-        // Save pending values so callback can finish the insertion.
-        const finalUsername = username.trim().toLowerCase()
-        const finalEmail = email.trim()
-        console.log('handleEmailSubmit: saving pending data for magic link:', { finalUsername, finalEmail })
-        try { localStorage.setItem('medius_pending_username', finalUsername) } catch {}
-        try { localStorage.setItem('medius_pending_email', finalEmail) } catch {}
-
-        const { error } = await supabase.auth.signInWithOtp({
+        // Sign up
+        const { error: signUpErr } = await supabase.auth.signUp({
           email,
+          password,
           options: { emailRedirectTo: callbackUrl },
         })
-        if (error) throw error
-        setMessage("Check your email for a sign-in link. After you follow the link we'll finish creating your username.")
+        if (signUpErr) throw signUpErr
+        setMessage("Check your email to confirm your account.")
       }
     } catch (err: any) {
       setError(err?.message ?? "Something went wrong")
@@ -301,19 +120,11 @@ export default function AuthPage() {
     setError(null)
     setLoading(true)
     try {
-      if (username.trim()) {
-        const finalUsername = username.trim().toLowerCase()
-        console.log('handleOAuth: saving pending username for OAuth:', finalUsername)
-        try { localStorage.setItem('medius_pending_username', finalUsername) } catch {}
-      }
-      if (email.trim()) {
-        const finalEmail = email.trim()
-        console.log('handleOAuth: saving pending email for OAuth:', finalEmail)
-        try { localStorage.setItem('medius_pending_email', finalEmail) } catch {}
-      }
-      const codeFromUrl = searchParams.get('ref')?.trim()
+      const codeFromUrl = searchParams.get("ref")?.trim()
       if (codeFromUrl) {
-        try { localStorage.setItem('medius_ref_code', codeFromUrl) } catch {}
+        try {
+          localStorage.setItem("medius_ref_code", codeFromUrl)
+        } catch {}
       }
     } catch {}
 
@@ -327,107 +138,152 @@ export default function AuthPage() {
     }
   }
 
-  const inputBase =
-    "h-12 w-full rounded-md border border-white/10 bg-[#111111] px-3 text-[16px] text-white " +
-  "placeholder:text-[16px] placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-orange-500/40"
-
   return (
-    <div className="relative flex min-h-screen items-center justify-center bg-black text-white overflow-hidden">
-      <div className="pointer-events-none absolute inset-0 opacity-80">
-        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[1200px] h-[700px] rounded-full blur-3xl bg-[radial-gradient(closest-side,rgba(255,149,0,0.25),rgba(0,0,0,0))]" />
-        <div className="absolute inset-0 bg-[radial-gradient(1200px_700px_at_50%_100%,rgba(255,149,0,0.12),transparent_60%)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0)_0%,rgba(0,0,0,0.65)_45%,rgba(0,0,0,0.95)_100%)]" />
+    <div className="relative flex min-h-screen items-center justify-center bg-black text-white">
+      <div className="absolute inset-0 opacity-40">
+        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[800px] h-[600px] rounded-full blur-3xl bg-orange-500/10" />
       </div>
 
-      <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/10 bg-[#0b0b0c]/95 p-8 shadow-[0_10px_60px_rgba(255,149,0,0.25)]">
-        <div className="mx-auto mb-4 flex h-8 w-8 items-center justify-center">
-          <Image src="/images/image.png" alt="Logo" width={32} height={32} className="h-8 w-8 object-contain" priority />
-        </div>
-
-        <h1 className="text-center text-2xl font-semibold">Create an account</h1>
-
-        <form onSubmit={handleEmailSubmit} className="mt-6 space-y-4">
-          <div>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className={inputBase}
-              placeholder="Your email"
-            />
-          </div>
-          <div>
-            <div className="flex group">
-              <span className="relative inline-flex h-12 items-center rounded-l-md border border-r-0 border-white/10 bg-[#111111] px-3 text-[16px] text-gray-400 after:absolute after:right-0 after:top-2 after:bottom-2 after:w-px after:bg-white/10 after:transition-colors group-focus-within:after:bg-orange-500/50">
-                medius.com/
-              </span>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className={`${inputBase} rounded-l-none border-l-0 focus:ring-orange-500/40`}
-                placeholder="username"
+      <div className="relative z-10 w-full max-w-md">
+        <div className="rounded-xl border border-white/10 bg-black/80 backdrop-blur-sm p-8 shadow-lg transition-all duration-500 ease-out animate-in fade-in slide-in-from-bottom-4">
+          <div className="mb-8">
+            <div
+              className="mx-auto mb-6 flex h-10 w-10 items-center justify-center opacity-0 animate-in fade-in slide-in-from-top-2 delay-100"
+              style={{ animationFillMode: "forwards" }}
+            >
+              <Image
+                src="/images/image.png"
+                alt="Logo"
+                width={40}
+                height={40}
+                className="h-10 w-10 object-contain"
+                priority
               />
             </div>
+
+            <div className="flex gap-1 rounded-lg bg-white/5 p-1 mb-8">
+              <button
+                onClick={() => setIsLogin(true)}
+                className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors duration-300 ${
+                  isLogin ? "bg-white/10 text-white" : "text-white/60 hover:text-white"
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                onClick={() => setIsLogin(false)}
+                className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors duration-300 ${
+                  !isLogin ? "bg-white/10 text-white" : "text-white/60 hover:text-white"
+                }`}
+              >
+                Sign Up
+              </button>
+            </div>
+
+            <h1
+              className="text-center text-2xl font-semibold opacity-0 animate-in fade-in slide-in-from-top-4 delay-150"
+              style={{ animationFillMode: "forwards" }}
+            >
+              {isLogin ? "Welcome back" : "Create an account"}
+            </h1>
           </div>
-          <div>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className={inputBase}
-              placeholder="Password (to sign in or create account)"
-            />
+
+          <form
+            onSubmit={handleSubmit}
+            className="space-y-4 opacity-0 animate-in fade-in slide-in-from-bottom-2 delay-200"
+            style={{ animationFillMode: "forwards" }}
+          >
+            <div>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="h-12 w-full rounded-lg border border-white/10 bg-white/5 px-4 text-base text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-orange-500/50 focus:border-transparent transition-all duration-300"
+                placeholder="Email"
+              />
+            </div>
+            <div>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="h-12 w-full rounded-lg border border-white/10 bg-white/5 px-4 text-base text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-orange-500/50 focus:border-transparent transition-all duration-300"
+                placeholder="Password"
+              />
+            </div>
+            {error && <p className="text-sm text-red-400/90 animate-in fade-in duration-300">{error}</p>}
+            {message && <p className="text-sm text-emerald-400/90 animate-in fade-in duration-300">{message}</p>}
+            <button
+              type="submit"
+              disabled={loading}
+              className="mt-6 h-12 w-full rounded-lg bg-orange-500 text-base font-semibold text-white hover:bg-orange-600 disabled:opacity-50 transition-all duration-300 hover:shadow-lg hover:shadow-orange-500/20"
+            >
+              {loading ? "Loading..." : isLogin ? "Sign In" : "Sign Up"}
+            </button>
+          </form>
+
+          <div
+            className="mt-6 flex items-center gap-3 opacity-0 animate-in fade-in delay-300"
+            style={{ animationFillMode: "forwards" }}
+          >
+            <div className="h-px flex-1 bg-white/10" />
+            <span className="text-xs tracking-widest text-white/40">OR CONTINUE WITH</span>
+            <div className="h-px flex-1 bg-white/10" />
           </div>
-          {error && <p className="text-sm text-red-400">{error}</p>}
-          {message && <p className="text-sm text-green-400">{message}</p>}
-          <button
-            type="submit"
-            disabled={loading}
-            className="mt-2 inline-flex h-12 w-full items-center justify-center rounded-md bg-orange-500 text-[15px] font-semibold text-white hover:bg-orange-500/90 disabled:opacity-50"
-          >
-            {loading ? "Working..." : "Continue"}
-          </button>
-        </form>
 
-        <div className="mt-6 flex items-center gap-3">
-          <div className="h-px flex-1 bg-black/20" />
-          <span className="text-[11px] tracking-widest text-white/60">OR</span>
-          <div className="h-px flex-1 bg-black/20" />
+          <div
+            className="mt-4 grid grid-cols-2 gap-3 opacity-0 animate-in fade-in delay-300"
+            style={{ animationFillMode: "forwards" }}
+          >
+            <button
+              onClick={() => handleOAuth("discord")}
+              disabled={loading}
+              className="h-11 rounded-lg bg-[#5865F2] hover:bg-[#5865F2]/90 text-white font-medium transition-all duration-300 hover:shadow-lg hover:shadow-[#5865F2]/20 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 245 240" fill="currentColor">
+                <path d="M104.4 104.9c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.2-5 10.2-11.1s-4.5-11.1-10.2-11.1z" />
+                <path d="M189.5 20h-134A35.6 35.6 0 0020 55.6v128.7A35.6 35.6 0 0055.6 220h115.4l-5.4-18.7 13.1 12.1 12.4 11.4 22.4 20v-44.7l-.1-1.1V55.6A35.6 35.6 0 00189.5 20z" />
+              </svg>
+              <span className="text-sm">Discord</span>
+            </button>
+
+            <button
+              onClick={() => handleOAuth("google")}
+              disabled={loading}
+              className="h-11 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-white font-medium transition-all duration-300 hover:shadow-lg hover:shadow-white/10 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 48 48">
+                <path
+                  fill="#FFC107"
+                  d="M43.6 20.5H42V20H24v8h11.3C33.4 32.4 29 36 24 36c-6.6 0-12-5.4-12-12S17.4 12 24 12c3.1 0 6 1.2 8.2 3.2l5.7-5.7C34.1 6 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.1-.1-2.1-.4-3.1z"
+                />
+                <path
+                  fill="#FF3D00"
+                  d="M6.3 14.7l6.6 4.8C14.2 16 18.7 12 24 12c3.1 0 6 1.2 8.2 3.2l5.7-5.7C34.1 6 29.3 4 24 4 16.1 4 9.2 8.5 6.3 14.7z"
+                />
+                <path
+                  fill="#4CAF50"
+                  d="M24 44c5 0 9.7-1.9 13.2-5l-6.1-5c-2 1.4-4.6 2.2-7.1 2.2-5 0-9.3-3.6-10.7-8.4l-6.6 5.1C9.3 39.6 16.1 44 24 44z"
+                />
+                <path
+                  fill="#1976D2"
+                  d="M43.6 20.5H42V20H24v8h11.3c-1 3.1-3.4 5.6-6.3 6.9l.1.1 6.1 5C38 37.7 40 32.1 40 26c0-1.1-.1-2.1-.4-3.1z"
+                />
+              </svg>
+              <span className="text-sm">Google</span>
+            </button>
+          </div>
+
+          <p
+            className="mt-8 text-center text-xs text-white/40 opacity-0 animate-in fade-in delay-400"
+            style={{ animationFillMode: "forwards" }}
+          >
+            By continuing, you agree to our{" "}
+            <span className="text-white/60 hover:text-white/80 cursor-pointer transition-colors">Terms</span> &{" "}
+            <span className="text-white/60 hover:text-white/80 cursor-pointer transition-colors">Privacy</span>
+          </p>
         </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <button
-            onClick={() => handleOAuth("discord")}
-            disabled={loading}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#5865F2] px-3 text-[15px] font-medium text-white hover:brightness-110 disabled:opacity-50"
-          >
-            <svg className="h-5 w-5" viewBox="0 0 245 240" fill="currentColor">
-              <path d="M104.4 104.9c-5.7 0-10.2 5-10.2 11.1s4.6 11.1 10.2 11.1c5.7 0 10.2-5 10.2-11.1s-4.5-11.1-10.2-11.1z"/>
-              <path d="M189.5 20h-134A35.6 35.6 0 0020 55.6v128.7A35.6 35.6 0 0055.6 220h115.4l-5.4-18.7 13.1 12.1 12.4 11.4 22.4 20v-44.7l-.1-1.1V55.6A35.6 35.6 0 00189.5 20z"/>
-            </svg>
-            Discord
-          </button>
-
-          <button
-            onClick={() => handleOAuth("google")}
-            disabled={loading}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-white/10 bg-black text-[15px] font-medium text-white hover:brightness-110 disabled:opacity-50"
-          >
-            <svg className="h-5 w-5" viewBox="0 0 48 48">
-              <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.4 32.4 29 36 24 36c-6.6 0-12-5.4-12-12S17.4 12 24 12c3.1 0 6 1.2 8.2 3.2l5.7-5.7C34.1 6 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.1-.1-2.1-.4-3.1z"/>
-              <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.2 16 18.7 12 24 12c3.1 0 6 1.2 8.2 3.2l5.7-5.7C34.1 6 29.3 4 24 4 16.1 4 9.2 8.5 6.3 14.7z"/>
-              <path fill="#4CAF50" d="M24 44c5 0 9.7-1.9 13.2-5l-6.1-5c-2 1.4-4.6 2.2-7.1 2.2-5 0-9.3-3.6-10.7-8.4l-6.6 5.1C9.3 39.6 16.1 44 24 44z"/>
-              <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-1 3.1-3.4 5.6-6.3 6.9l.1.1 6.1 5C38 37.7 40 32.1 40 26c0-1.1-.1-2.1-.4-3.1z"/>
-            </svg>
-            Google
-          </button>
-        </div>
-
-        <p className="mt-6 text-center text-xs text-white/60">
-          By signing up, you agree to our <span className="text-white/80">Terms</span> & <span className="text-white/80">Privacy</span>
-        </p>
       </div>
     </div>
   )
